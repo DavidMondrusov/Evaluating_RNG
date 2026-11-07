@@ -1,0 +1,46 @@
+{
+  "runs": [
+    {
+      "name": "baseline",
+      "topology": {
+        "name": "Clos fat-tree",
+        "parameters": {
+          "k": 4
+        }
+      },
+      "traffic": {
+        "name": "Uniform random host pairs",
+        "flow_count": 8,
+        "demand_mbps": 1.0,
+        "seed": 1
+      },
+      "experiments": [
+        {
+          "name": "UDP iperf throughput",
+          "duration_seconds": 5
+        }
+      ]
+    },
+    {
+      "name": "higher-load",
+      "topology": {
+        "name": "Clos fat-tree",
+        "parameters": {
+          "k": 4
+        }
+      },
+      "traffic": {
+        "name": "Uniform random host pairs",
+        "flow_count": 16,
+        "demand_mbps": 2.0,
+        "seed": 2
+      },
+      "experiments": [
+        {
+          "name": "UDP iperf throughput",
+          "duration_seconds": 10
+        }
+      ]
+    }
+  ]
+}
