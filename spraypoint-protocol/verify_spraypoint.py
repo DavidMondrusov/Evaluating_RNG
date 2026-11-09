@@ -48,7 +48,7 @@ def parse_args():
 
 
 # --------------------------------------------------------------------- report
-def print_levels(la: LevelAssignment, compare_paper: bool) -> None:
+def print_levels(la: LevelAssignment) -> None:
     print(f"\nLevels toward {la.destination} (l={la.l}):")
     for label, nodes in la.table().items():
         print(f"  {label:>4}: {', '.join(nodes)}")
@@ -60,19 +60,6 @@ def print_levels(la: LevelAssignment, compare_paper: bool) -> None:
     print("  next hops:")
     for u in sorted(la.next_hops, key=lambda n: (la.level_of(n), n)):
         print(f"    {la.level_of(u):>4} {u:>4} -> {', '.join(la.next_hops[u])}")
-    if compare_paper and la.destination == "t":
-        diffs = []
-        for label, expected in figure3.PAPER_LEVELS_T.items():
-            for node in expected:
-                got = la.level_of(node)
-                if got != label:
-                    diffs.append(f"{node}: paper {label}, computed {got}")
-        if diffs:
-            print("  differences from the paper's level table:")
-            for d in diffs:
-                print(f"    - {d}")
-        else:
-            print("  matches the paper's level table")
 
 
 def print_walk(la: LevelAssignment, compiler: RuleCompiler, src: str) -> None:
@@ -142,7 +129,7 @@ def main() -> int:
     if args.dry_run:
         compiler = RuleCompiler(offline_graph(), params, overrides, figure3.subnets())
         la = compiler.levels(args.dst)
-        print_levels(la, args.waypoints == "paper")
+        print_levels(la)
         print_walk(la, compiler, args.src)
         rules = (compiler.compile_pair(src_h, dst_h) if args.mode == "pair"
                  else compiler.compile_full_mesh())
@@ -165,7 +152,7 @@ def main() -> int:
         dep = SpraypointDeployer(net, params, waypoint_overrides=overrides,
                                  subnets=figure3.subnets())
         la = dep.levels(args.dst)
-        print_levels(la, args.waypoints == "paper")
+        print_levels(la)
         print_walk(la, dep.compiler, args.src)
 
         if args.mode == "pair":
