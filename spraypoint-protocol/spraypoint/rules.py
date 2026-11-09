@@ -4,8 +4,15 @@ Per switch the pipeline is a single table with these priorities:
 
     300  ip,nw_dst=<local host>/32                -> output:<host port>    (delivery)
     200  in_port=<host port>,ip,nw_dst=<dst>      -> group:1               (spraying, "server-facing VRF")
+    110  in_port=<P>,ip,nw_dst=<dst>              -> in_port / group:N     (pointing, bounce back out P)
     100  ip,nw_dst=<dst>                          -> output / group:N      (pointing, "fabric-facing VRF")
       0  (table miss)                             -> drop
+
+OpenFlow silently drops ``output:P`` when P is the packet's ingress port, but
+Spraypoint relies on exactly that move: v2 sprays to w3, and w3 points back
+to v2 over the same link. Every pointing rule whose next-hop ports could also
+be the ingress port therefore gets a priority-110 twin per such port that
+uses the ``in_port`` action (or a group whose bucket for P is ``in_port``).
 
 The ``in_port`` match on the host port is what separates the two VRFs: a
 packet only gets sprayed when it comes from a local host. A packet that
@@ -23,6 +30,7 @@ from .params import SpraypointParams
 
 PRIO_DELIVER = 300
 PRIO_SPRAY = 200
+PRIO_BOUNCE = 110
 PRIO_POINT = 100
 PRIO_MISS = 0
 
@@ -35,9 +43,13 @@ class Group:
     group_id: int
     ports: Tuple[int, ...]
     purpose: str  # "spray" or "point"
+    ingress: Optional[int] = None  # bucket for this port sends back out in_port
+
+    def bucket_action(self, port: int) -> str:
+        return "in_port" if port == self.ingress else f"output:{port}"
 
     def to_ofctl(self) -> str:
-        buckets = ",".join(f"bucket=output:{p}" for p in self.ports)
+        buckets = ",".join(f"bucket=actions={self.bucket_action(p)}" for p in self.ports)
         return f"group_id={self.group_id},type=select,{buckets}"
 
 
@@ -62,7 +74,7 @@ class SwitchRules:
     switch: str
     groups: Dict[int, Group] = field(default_factory=dict)
     flows: List[Flow] = field(default_factory=list)
-    _point_groups: Dict[Tuple[int, ...], int] = field(default_factory=dict, repr=False)
+    _point_groups: Dict[Tuple[Tuple[int, ...], Optional[int]], int] = field(default_factory=dict, repr=False)
     _flow_keys: Set[Tuple[int, str]] = field(default_factory=set, repr=False)
 
     def add_flow(self, flow: Flow) -> None:
@@ -77,13 +89,13 @@ class SwitchRules:
             self.groups[SPRAY_GROUP_ID] = Group(SPRAY_GROUP_ID, tuple(sorted(ports)), "spray")
         return SPRAY_GROUP_ID
 
-    def point_group(self, ports: Sequence[int]) -> int:
-        """Shared select group per distinct next-hop port set (like ECMP group reuse)."""
-        key = tuple(sorted(ports))
+    def point_group(self, ports: Sequence[int], ingress: Optional[int] = None) -> int:
+        """Shared select group per distinct (next-hop port set, ingress) pair."""
+        key = (tuple(sorted(ports)), ingress)
         if key not in self._point_groups:
             gid = FIRST_POINT_GROUP_ID + len(self._point_groups)
             self._point_groups[key] = gid
-            self.groups[gid] = Group(gid, key, "point")
+            self.groups[gid] = Group(gid, key[0], "point", ingress)
         return self._point_groups[key]
 
 
@@ -221,9 +233,15 @@ class RuleCompiler:
         if not hops:
             return  # disconnected from t
         ports = sorted(p for v in hops for p in self.graph.ports_to(u, v))
+        prefix = "dec_ttl," if self.dec_ttl else ""
         out = f"output:{ports[0]}" if len(ports) == 1 else f"group:{r.point_group(ports)}"
-        actions = f"dec_ttl,{out}" if self.dec_ttl else out
-        level = la.level_of(u)
+        comment = f"{la.level_of(u)} -> {','.join(hops)} toward {t}"
         for m in matches:
-            r.add_flow(Flow(PRIO_POINT, f"ip,nw_dst={m}", actions, self.cookie(t),
-                            f"{level} -> {','.join(hops)} toward {t}"))
+            r.add_flow(Flow(PRIO_POINT, f"ip,nw_dst={m}", prefix + out, self.cookie(t), comment))
+            # A packet that arrived on one of the next-hop ports (e.g. the
+            # source sprayed it here and we point straight back) must leave
+            # through the in_port action, or OVS drops it.
+            for p in ports:
+                bounce = "in_port" if len(ports) == 1 else f"group:{r.point_group(ports, p)}"
+                r.add_flow(Flow(PRIO_BOUNCE, f"in_port={p},ip,nw_dst={m}", prefix + bounce,
+                                self.cookie(t), comment + " (bounce)"))

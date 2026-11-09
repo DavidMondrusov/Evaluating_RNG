@@ -74,9 +74,21 @@ class Simulator:
                 outcomes.add(("drop", path))
                 continue
             target = flow.actions.split(",")[-1]
-            kind, num = target.split(":")
-            ports = (self.rules[sw].groups[int(num)].ports if kind == "group" else (int(num),))
+            if target == "in_port":
+                ports = (in_port,)
+            elif target.startswith("group:"):
+                group = self.rules[sw].groups[int(target.split(":")[1])]
+                ports = tuple(in_port if group.bucket_action(p) == "in_port" else p
+                              for p in group.ports)
+            else:
+                ports = (int(target.split(":")[1]),)
             for port in ports:
+                # OpenFlow: output:P is a no-op when P is the ingress port.
+                if port == in_port and target != "in_port" and not (
+                        target.startswith("group:") and
+                        self.rules[sw].groups[int(target.split(":")[1])].ingress == in_port):
+                    outcomes.add(("drop", path))
+                    continue
                 if (sw, port) in self.host_ports:
                     outcomes.add(("delivered", self.host_ports[(sw, port)].name))
                 else:
