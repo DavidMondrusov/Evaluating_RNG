@@ -71,7 +71,9 @@ class FabricGraph:
         """Build a graph from switch edges with synthetic port numbers.
 
         Each switch gets ``hosts_per_switch`` hosts on the lowest ports, then
-        fabric ports in edge order. ``host_ip(switch, index, k)`` may return
+        fabric ports in edge order. Ports are named ``<source>-<target>``
+        (``v2-w3``, ``v2-h_v2``), like the Figure 3 Mininet build.
+        ``host_ip(switch, index, k)`` may return
         the IP of the k-th host on a switch; by default 10.0.<index>.<k+1>.
         """
         graph = cls()
@@ -85,17 +87,17 @@ class FabricGraph:
         for index, sw in enumerate(order, start=1):
             for k in range(hosts_per_switch):
                 ip = host_ip(sw, index, k) if host_ip else f"10.0.{index}.{k + 1}"
+                name = f"h_{sw}" if hosts_per_switch == 1 else f"h_{sw}_{k}"
                 graph.add_host(HostAttachment(
-                    name=f"h_{sw}" if hosts_per_switch == 1 else f"h_{sw}_{k}",
-                    ip=ip, mac=None, switch=sw, port=k + 1,
-                    port_name=f"{sw}-host" if hosts_per_switch == 1 else f"{sw}-host{k}",
+                    name=name, ip=ip, mac=None, switch=sw, port=k + 1,
+                    port_name=f"{sw}-{name}",
                 ))
             next_port[sw] = hosts_per_switch + 1
         for u, v in edges:
             pu, pv = next_port[u], next_port[v]
             next_port[u] += 1
             next_port[v] += 1
-            graph.add_fabric_link(u, pu, v, pv, f"{u}-eth{pu}", f"{v}-eth{pv}")
+            graph.add_fabric_link(u, pu, v, pv, f"{u}-{v}", f"{v}-{u}")
         return graph
 
     # ----------------------------------------------------------- queries

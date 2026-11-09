@@ -103,8 +103,9 @@ imported.
 
 ## Running the verification script
 
-The script builds Figure 3 (35 switches, one host `h_<switch>` per switch, with
-the switch side of that link named `<switch>-host`). It uses `p=2, h=1, l=1`,
+The script builds Figure 3 (35 switches, one host `h_<switch>` per switch).
+Every interface is named `<source>-<target>`: `v2-w3` is v2's port toward w3,
+`v2-h_v2` is v2's host port, and `h_v2-v2` is the interface inside the host. It uses `p=2, h=1, l=1`,
 installs the rules, prints the levels and the walkthrough, dumps the tables,
 and then checks reachability between `v2` and `t`:
 
@@ -204,7 +205,7 @@ sudo ovs-ofctl -O OpenFlow13 --names dump-flows v2
 # the script prints it, e.g. 0x13 for t)
 sudo ovs-ofctl -O OpenFlow13 dump-flows v2 cookie=0x13/-1
 
-# Port number <-> interface name (v2-host is the host port)
+# Port number <-> interface name (v2-h_v2 is the host port)
 sudo ovs-ofctl -O OpenFlow13 show v2
 
 # Bridge settings applied by the deployer

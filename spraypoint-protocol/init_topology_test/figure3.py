@@ -1,8 +1,10 @@
 """Figure 3 of the Spraypoint overview: Mininet builder plus the paper's expectations.
 
 The switch-level edges come from ``init_topology_nodes.py``. Every switch gets
-one host ``h_<switch>``; the switch side of that link is named
-``<switch>-host`` so it is easy to spot in ``ovs-ofctl`` output.
+one host ``h_<switch>``. Every interface is named ``<source>-<target>``:
+the end of a link that sits on node ``a`` and leads to node ``b`` is ``a-b``
+(``v2-w3`` on v2 toward w3, ``v2-h_v2`` toward v2's host, ``h_v2-v2`` inside
+the host).
 """
 
 from __future__ import annotations
@@ -41,6 +43,14 @@ def host_name(switch: str) -> str:
     return f"h_{switch}"
 
 
+def intf_name(source: str, target: str) -> str:
+    """Interface on ``source`` that leads to ``target``."""
+    name = f"{source}-{target}"
+    if len(name) > 15:  # Linux IFNAMSIZ - 1
+        raise ValueError(f"interface name {name!r} exceeds 15 characters")
+    return name
+
+
 def subnets():
     """Each switch owns 10.<index>.0.0/16; its host is 10.<index>.0.1."""
     return {sw: f"10.{i}.0.0/16" for i, sw in enumerate(switch_names(), start=1)}
@@ -66,8 +76,9 @@ def build_network(bw_mbps=None):
         net.addSwitch(sw, dpid=f"{i:016x}")
     for i, sw in enumerate(names, start=1):
         host = net.addHost(host_name(sw), ip=f"10.{i}.0.1/8")
-        net.addLink(host, sw, intfName2=f"{sw}-host", **link_opts)
+        net.addLink(host, sw, intfName1=intf_name(host.name, sw),
+                    intfName2=intf_name(sw, host.name), **link_opts)
     for u, v in edges:
-        net.addLink(u, v, **link_opts)
+        net.addLink(u, v, intfName1=intf_name(u, v), intfName2=intf_name(v, u), **link_opts)
     net.build()
     return net
