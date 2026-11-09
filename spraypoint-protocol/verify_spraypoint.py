@@ -176,6 +176,9 @@ def main() -> int:
 
         if args.cli:
             from mininet.cli import CLI
+            # The CLI prints nodes/net/dump/ping through Mininet's logger at
+            # "output" level, which "warning" (used above to quiet startup) hides.
+            setLogLevel("output")
             CLI(net)
     finally:
         net.stop()
