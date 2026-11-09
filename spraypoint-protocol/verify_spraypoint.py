@@ -23,7 +23,7 @@ from spraypoint import FabricGraph, RuleCompiler, SpraypointParams
 from spraypoint.deployer import plan_script
 from spraypoint.levels import LevelAssignment
 
-WALKTHROUGH_SWITCHES = ["v2", "w3", "w4", "o1", "t"]
+WALKTHROUGH_SWITCHES = ["v2", "w3", "w4", "o1", "r6", "w5", "v3", "t"]
 
 
 def parse_args():

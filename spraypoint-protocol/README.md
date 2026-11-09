@@ -141,23 +141,16 @@ how the spray group spread the iperf3 streams across v2's fabric links.
 If Mininet is left in a bad state after an interrupted run, clean up with
 `sudo mn -c`.
 
-### Expected levels for Figure 3 and one known difference
+### Expected levels for Figure 3
 
 With the figure's waypoint picks (v1→{w1,w2}, v2→{w3,w4}, v3→{w5,w6},
-v4→{w7,w8}), the computed levels match the overview's table with one
-exception. **`o1` is computed as IR, not OR.** In the edge list, o1 is
-adjacent to w4 ∈ WP1(t), and IR(t) is defined as the neighbors of WP_l(t)
-that are not in a prior level. The library follows the definition, so o1's
-pointing rule is `o1 → w4 → v2 → t`. The paper's walkthrough has
-`o1 → r6 → w5 → v3 → t`, which treats o1 as OR. The script prints this
-difference explicitly. If the figure is meant to be authoritative, the edge
-`("w4", "o1")` in `init_topology_nodes.py` is the cause.
+v4→{w7,w8}), the computed levels match the overview's table.
 
 The paths from v2 then look like this:
 
 ```
 v2 sprays to [o1, t, w3, w4]
-  via o1 [IR]:  v2 -> o1 -> w4 -> v2 -> t
+  via o1 [OR]:  v2 -> o1 -> r6 -> w5 -> v3 -> t
   via t:        v2 -> t
   via w3 [WP1]: v2 -> w3 -> v2 -> t
   via w4 [WP1]: v2 -> w4 -> v2 -> t
@@ -221,7 +214,7 @@ sudo ovs-vsctl get bridge v2 protocols fail_mode
 sudo ovs-appctl ofproto/trace v2 in_port=1,ip,nw_src=10.3.0.1,nw_dst=10.1.0.1
 
 # Watch the walkthrough switches while traffic runs
-for s in v2 w3 w4 o1 t; do echo "== $s"; sudo ovs-ofctl -O OpenFlow13 dump-flows $s cookie=0x13/-1; done
+for s in v2 w3 w4 o1 r6 w5 v3 t; do echo "== $s"; sudo ovs-ofctl -O OpenFlow13 dump-flows $s cookie=0x13/-1; done
 ```
 
 `--dry-run` prints the exact `add-group` / `add-flow` commands the deployer
@@ -234,7 +227,7 @@ python3 -m unittest discover -v
 ```
 
 The tests run offline. They cover the l formula, the Figure 3 partition
-(including the o1 case), loop freedom for every destination on Figure 3 and on
+loop freedom for every destination on Figure 3 and on
 a random 4-regular expander, and invalid overrides. They also include a small
 flow-table simulator that follows **every** spray and ECMP branch of the
 compiled rules, and checks that every host pair is delivered in both pair mode

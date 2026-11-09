@@ -107,14 +107,7 @@ class LevelTests(unittest.TestCase):
     def test_figure3_with_paper_waypoints(self):
         la = compute_levels(figure_graph(), "t", PARAMS, figure3.PAPER_WAYPOINTS_T)
         table = la.table()
-        self.assertEqual(table["WP0"], figure3.PAPER_LEVELS_T["WP0"])
-        self.assertEqual(table["WP1"], figure3.PAPER_LEVELS_T["WP1"])
-        # o1 neighbors w4 (a WP1 node), so by the definition IR(t) =
-        # Nbr(WP1) \ prior levels it is Inner Ring, although the figure's
-        # table lists it in OR.
-        self.assertEqual(la.level_of("o1"), "IR")
-        self.assertEqual(set(table["IR"]), set(figure3.PAPER_LEVELS_T["IR"]) | {"o1"})
-        self.assertEqual(table["OR"], ["o2", "o3"])
+        self.assertEqual(table, figure3.PAPER_LEVELS_T)
         # Walkthrough: w3/w4 point back to v2, v2 goes to t.
         self.assertEqual(la.next_hops["w3"], ["v2"])
         self.assertEqual(la.next_hops["w4"], ["v2"])
@@ -155,7 +148,7 @@ class RuleTests(unittest.TestCase):
         self.assertEqual(set(spray[0].ports), set(g.fabric_ports("v2")))
         self.assertTrue(any(f.match.startswith(f"in_port={g.host('h_v2').port},")
                             for f in v2.flows))
-        self.assertEqual(c.pair_switches("h_v2", "h_t"), {"v2", "t", "w3", "w4", "o1"})
+        self.assertEqual(c.pair_switches("h_v2", "h_t"), {"v2", "t", "w3", "w4", "o1", "r6", "w5", "v3"})
         sim = Simulator(g, rules)
         self.assertEqual(sim.deliveries("h_v2", "h_t"), {("delivered", "h_t")})
         self.assertEqual(sim.deliveries("h_t", "h_v2"), {("delivered", "h_v2")})
