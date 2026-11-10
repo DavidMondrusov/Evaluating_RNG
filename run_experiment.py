@@ -17,7 +17,7 @@ from mininet.net import Mininet
 from mininet.node import OVSController
 
 from experiments import iperf
-from topologies import clos, rail_optimized
+from topologies import clos, jupiter, rail_optimized
 from traffic import uniform_random
 
 
@@ -32,6 +32,13 @@ TOPOLOGIES = {
         "builder": rail_optimized.build_topology,
         "parameters": dict(rail_optimized.DEFAULT_PARAMETERS),
         "routing": rail_optimized.install_routing,
+        "validate": rail_optimized.validate_parameters,
+    },
+    "Jupiter direct-connect": {
+        "builder": jupiter.build_topology,
+        "parameters": dict(jupiter.DEFAULT_PARAMETERS),
+        "routing": jupiter.install_routing,
+        "validate": jupiter.validate_parameters,
     },
 }
 TRAFFIC_MODELS = {"Uniform random host pairs": uniform_random.build_traffic}
@@ -170,9 +177,10 @@ def normalize_run_config(config, location):
         **TOPOLOGIES[topology_name]["parameters"],
         **topology_parameters,
     }
-    if topology_name == "Rail-optimized":
+    validate_topology = TOPOLOGIES[topology_name].get("validate")
+    if validate_topology:
         try:
-            rail_optimized.validate_parameters(**topology_parameters)
+            validate_topology(**topology_parameters)
         except ValueError as error:
             raise ValueError(f"{location}.topology.parameters: {error}") from error
     else:
