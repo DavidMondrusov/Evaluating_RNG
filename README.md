@@ -36,7 +36,9 @@ sudo /home/rng/mininet-env/bin/python /home/rng/Evaluating_RNG/run_experiment.py
 
 The file contains a `runs` array. Each run can set a `name`, topology name and
 parameters, traffic model and parameters, and a list of experiments with
-their parameters. Currently supported names are `Clos fat-tree`, `Uniform
+their parameters. Currently supported names are `Clos fat-tree`, `Rail-optimized`
+(parameters `scalable_units`, `servers_per_unit`, `gpus_per_server`,
+`spine_count`; one host per GPU NIC, one leaf per rail per unit), `Uniform
 random host pairs`, and `UDP iperf throughput`. Omitted fields use the same
 defaults as the interactive menus (4-ary topology, 8 flows at 1 Mbps, seed 1,
 and 5-second iperf duration). Every run gets its own results directory; if a

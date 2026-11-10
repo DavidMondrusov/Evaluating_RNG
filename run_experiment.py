@@ -17,7 +17,7 @@ from mininet.net import Mininet
 from mininet.node import OVSController
 
 from experiments import iperf
-from topologies import clos
+from topologies import clos, rail_optimized
 from traffic import uniform_random
 
 
@@ -27,7 +27,12 @@ TOPOLOGIES = {
     "Clos fat-tree": {
         "builder": clos.build_topology,
         "parameters": {"k": 4},
-    }
+    },
+    "Rail-optimized": {
+        "builder": rail_optimized.build_topology,
+        "parameters": dict(rail_optimized.DEFAULT_PARAMETERS),
+        "routing": rail_optimized.install_routing,
+    },
 }
 TRAFFIC_MODELS = {"Uniform random host pairs": uniform_random.build_traffic}
 EXPERIMENTS = {
@@ -165,16 +170,22 @@ def normalize_run_config(config, location):
         **TOPOLOGIES[topology_name]["parameters"],
         **topology_parameters,
     }
-    k = topology_parameters.get("k")
-    if (
-        not isinstance(k, int)
-        or isinstance(k, bool)
-        or k < 2
-        or k % 2
-    ):
-        raise ValueError(
-            f"{location}.topology.parameters.k must be an even integer >= 2"
-        )
+    if topology_name == "Rail-optimized":
+        try:
+            rail_optimized.validate_parameters(**topology_parameters)
+        except ValueError as error:
+            raise ValueError(f"{location}.topology.parameters: {error}") from error
+    else:
+        k = topology_parameters.get("k")
+        if (
+            not isinstance(k, int)
+            or isinstance(k, bool)
+            or k < 2
+            or k % 2
+        ):
+            raise ValueError(
+                f"{location}.topology.parameters.k must be an even integer >= 2"
+            )
 
     traffic_config = require_mapping(
         config.get("traffic", {}),
@@ -424,15 +435,20 @@ def run_experiment(config, config_source=None):
             node: f"h{index}"
             for index, node in enumerate(host_nodes, start=1)
         }
+        # Topologies with their own routing install static flows instead of
+        # relying on Mininet's learning-switch controller.
+        install_routing = TOPOLOGIES[topology_config["name"]].get("routing")
         net = Mininet(
             topo=mininet_topology,
             link=TCLink,
-            controller=OVSController,
+            controller=None if install_routing else OVSController,
             build=False,
         )
         network_needs_cleanup = True
         net.build()
         net.start()
+        if install_routing:
+            install_routing(net, topology)
         for experiment_config in config["experiments"]:
             experiment_name = experiment_config["name"]
             experiment_result = EXPERIMENTS[experiment_name]["runner"](
