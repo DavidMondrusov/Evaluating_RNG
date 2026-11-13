@@ -14,9 +14,15 @@ import networkx
 import mininet
 from mininet.link import TCLink
 from mininet.net import Mininet
-from mininet.node import OVSController
 
-from experiments import iperf
+from experiments import iperf, oversubscription
+from routing import (
+    DEFAULT_ROUTING,
+    ROUTING_METHODS,
+    configure as configure_routing,
+    default_parameters as default_routing_parameters,
+    get_controller_class,
+)
 from topologies import clos
 from traffic import uniform_random
 
@@ -26,7 +32,12 @@ RESULTS_ROOT = ROOT / "test-results"
 TOPOLOGIES = {
     "Clos fat-tree": {
         "builder": clos.build_topology,
-        "parameters": {"k": 4},
+        "parameters": {
+            "k": 4,
+            "host_link_mbps": 10,
+            "edge_uplink_mbps": 10,
+            "aggregation_uplink_mbps": 10,
+        },
     }
 }
 TRAFFIC_MODELS = {"Uniform random host pairs": uniform_random.build_traffic}
@@ -34,6 +45,12 @@ EXPERIMENTS = {
     "UDP iperf throughput": {
         "runner": iperf.run,
         "parameters": {"duration_seconds": 5},
+        "requires_network": True,
+    },
+    "Topology oversubscription ratio": {
+        "runner": oversubscription.run,
+        "parameters": {},
+        "requires_network": False,
     }
 }
 DEFAULT_TOPOLOGY = next(iter(TOPOLOGIES))
@@ -137,11 +154,56 @@ def normalize_run_config(config, location):
     config = require_mapping(
         config,
         location,
-        {"name", "topology", "traffic", "experiments"},
+        {"name", "topology", "routing", "traffic", "experiments"},
     )
     name = config.get("name")
     if name is not None and (not isinstance(name, str) or not name.strip()):
         raise ValueError(f"{location}.name must be a non-empty string")
+
+    routing_config = require_mapping(
+        config.get("routing", {}),
+        f"{location}.routing",
+        {"name", "parameters"},
+    )
+    routing_name = routing_config.get("name", DEFAULT_ROUTING)
+    if not isinstance(routing_name, str) or routing_name not in ROUTING_METHODS:
+        raise ValueError(
+            f"{location}.routing.name must be one of: "
+            + ", ".join(ROUTING_METHODS)
+        )
+    routing_parameters = require_mapping(
+        routing_config.get("parameters", {}),
+        f"{location}.routing.parameters",
+        default_routing_parameters(routing_name),
+    )
+    routing_parameters = {
+        **default_routing_parameters(routing_name),
+        **routing_parameters,
+    }
+    if routing_name == "Spraypoint":
+        for parameter in ("p", "h"):
+            value = routing_parameters[parameter]
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                raise ValueError(
+                    f"{location}.routing.parameters.{parameter} must be a "
+                    "positive integer"
+                )
+        levels = routing_parameters["l"]
+        if levels is not None and (
+            not isinstance(levels, int)
+            or isinstance(levels, bool)
+            or levels < 0
+        ):
+            raise ValueError(
+                f"{location}.routing.parameters.l must be a non-negative "
+                "integer or null"
+            )
+        hash_key = routing_parameters["hash_key"]
+        if not isinstance(hash_key, str) or not hash_key:
+            raise ValueError(
+                f"{location}.routing.parameters.hash_key must be a "
+                "non-empty string"
+            )
 
     topology_config = config.get("topology", {})
     topology_config = require_mapping(
@@ -175,6 +237,22 @@ def normalize_run_config(config, location):
         raise ValueError(
             f"{location}.topology.parameters.k must be an even integer >= 2"
         )
+    for parameter in (
+        "host_link_mbps",
+        "edge_uplink_mbps",
+        "aggregation_uplink_mbps",
+    ):
+        capacity = topology_parameters[parameter]
+        if (
+            not isinstance(capacity, (int, float))
+            or isinstance(capacity, bool)
+            or not math.isfinite(capacity)
+            or capacity <= 0
+        ):
+            raise ValueError(
+                f"{location}.topology.parameters.{parameter} must be a "
+                "positive finite number"
+            )
 
     traffic_config = require_mapping(
         config.get("traffic", {}),
@@ -222,12 +300,11 @@ def normalize_run_config(config, location):
     experiments = []
     for index, raw_experiment in enumerate(raw_experiments, start=1):
         experiment_location = f"{location}.experiments[{index}]"
-        experiment_config = require_mapping(
-            raw_experiment,
-            experiment_location,
-            {"name", "duration_seconds"},
+        experiment_name = (
+            raw_experiment.get("name", DEFAULT_EXPERIMENT)
+            if isinstance(raw_experiment, Mapping)
+            else DEFAULT_EXPERIMENT
         )
-        experiment_name = experiment_config.get("name", DEFAULT_EXPERIMENT)
         if (
             not isinstance(experiment_name, str)
             or experiment_name not in EXPERIMENTS
@@ -236,29 +313,38 @@ def normalize_run_config(config, location):
                 f"{experiment_location}.name must be one of: "
                 + ", ".join(EXPERIMENTS)
             )
+        experiment_parameters = EXPERIMENTS[experiment_name]["parameters"]
+        experiment_config = require_mapping(
+            raw_experiment,
+            experiment_location,
+            {"name", *experiment_parameters},
+        )
         parameters = {
-            **EXPERIMENTS[experiment_name]["parameters"],
+            **experiment_parameters,
             **{
                 key: value
                 for key, value in experiment_config.items()
                 if key != "name"
             },
         }
-        duration_seconds = parameters["duration_seconds"]
-        if (
-            not isinstance(duration_seconds, int)
-            or isinstance(duration_seconds, bool)
-            or duration_seconds < 1
-        ):
-            raise ValueError(
-                f"{experiment_location}.duration_seconds must be a positive integer"
-            )
+        if "duration_seconds" in parameters:
+            duration_seconds = parameters["duration_seconds"]
+            if (
+                not isinstance(duration_seconds, int)
+                or isinstance(duration_seconds, bool)
+                or duration_seconds < 1
+            ):
+                raise ValueError(
+                    f"{experiment_location}.duration_seconds must be a "
+                    "positive integer"
+                )
         experiments.append(
             {"name": experiment_name, "parameters": parameters}
         )
 
     return {
         "name": name.strip() if name else None,
+        "routing": {"name": routing_name, "parameters": routing_parameters},
         "topology": {"name": topology_name, "parameters": topology_parameters},
         "traffic": {"name": traffic_name, **traffic_parameters},
         "experiments": experiments,
@@ -321,26 +407,35 @@ def topology_snapshot(topology):
 def interactive_config():
     print("Network experiment runner")
     topology_name = choose_one("Choose a topology", TOPOLOGIES)
+    routing_name = choose_one("Choose a routing option", ROUTING_METHODS)
     traffic_name = choose_one("Choose a traffic model", TRAFFIC_MODELS)
     experiment_names = choose_many("Choose experiments to run", EXPERIMENTS)
 
     flow_count = prompt_positive_int("Number of traffic flows", 8)
     demand_mbps = prompt_positive_float("Demand per flow (Mbps)", 1.0)
     seed = prompt_integer("Random seed", 1)
-    duration_seconds = prompt_positive_int("UDP iperf duration per flow (seconds)", 5)
+    experiments = []
+    for experiment_name in experiment_names:
+        experiment = {"name": experiment_name}
+        if "duration_seconds" in EXPERIMENTS[experiment_name]["parameters"]:
+            experiment["duration_seconds"] = prompt_positive_int(
+                "UDP iperf duration per flow (seconds)", 5
+            )
+        experiments.append(experiment)
     return normalize_run_config(
         {
             "topology": {"name": topology_name},
+            "routing": {
+                "name": routing_name,
+                "parameters": default_routing_parameters(routing_name),
+            },
             "traffic": {
                 "name": traffic_name,
                 "flow_count": flow_count,
                 "demand_mbps": demand_mbps,
                 "seed": seed,
             },
-            "experiments": [
-                {"name": name, "duration_seconds": duration_seconds}
-                for name in experiment_names
-            ],
+            "experiments": experiments,
         },
         "interactive run",
     )
@@ -352,15 +447,40 @@ def run_experiment(config, config_source=None):
     topology = TOPOLOGIES[topology_config["name"]]["builder"](
         **topology_config["parameters"]
     )
-    traffic_matrix = TRAFFIC_MODELS[traffic_config["name"]](
-        topology,
-        flow_count=traffic_config["flow_count"],
-        demand_mbps=traffic_config["demand_mbps"],
-        seed=traffic_config["seed"],
+    network_required = any(
+        EXPERIMENTS[experiment["name"]]["requires_network"]
+        for experiment in config["experiments"]
     )
+    traffic_matrix = None
+    if network_required:
+        traffic_matrix = TRAFFIC_MODELS[traffic_config["name"]](
+            topology,
+            flow_count=traffic_config["flow_count"],
+            demand_mbps=traffic_config["demand_mbps"],
+            seed=traffic_config["seed"],
+        )
+
     run_id, run_dir = create_run_directory()
-    traffic_path = run_dir / "traffic-matrix.xml"
-    fnss.write_traffic_matrix(traffic_matrix, str(traffic_path))
+    traffic_summary = None
+    if traffic_matrix is not None:
+        traffic_path = run_dir / "traffic-matrix.xml"
+        fnss.write_traffic_matrix(traffic_matrix, str(traffic_path))
+        traffic_summary = {
+            "name": traffic_config["name"],
+            "flow_count": len(traffic_matrix),
+            "demand_mbps": traffic_config["demand_mbps"],
+            "seed": traffic_config["seed"],
+            "volume_unit": traffic_matrix.attrib["volume_unit"],
+            "file": traffic_path.name,
+            "flows": [
+                {
+                    "source_node": str(source),
+                    "destination_node": str(destination),
+                    "demand_mbps": volume,
+                }
+                for (source, destination), volume in traffic_matrix.flows().items()
+            ],
+        }
 
     summary = {
         "run_id": run_id,
@@ -383,22 +503,9 @@ def run_experiment(config, config_source=None):
             "parameters": topology_config["parameters"],
             **topology_snapshot(topology),
         },
-        "traffic": {
-            "name": traffic_config["name"],
-            "flow_count": len(traffic_matrix),
-            "demand_mbps": traffic_config["demand_mbps"],
-            "seed": traffic_config["seed"],
-            "volume_unit": traffic_matrix.attrib["volume_unit"],
-            "file": traffic_path.name,
-            "flows": [
-                {
-                    "source_node": str(source),
-                    "destination_node": str(destination),
-                    "demand_mbps": volume,
-                }
-                for (source, destination), volume in traffic_matrix.flows().items()
-            ],
-        },
+        "routing": config["routing"],
+        "routing_setup": None,
+        "traffic": traffic_summary,
         "experiments": [],
     }
     summary_path = run_dir / "results.json"
@@ -407,41 +514,57 @@ def run_experiment(config, config_source=None):
     net = None
     network_needs_cleanup = False
     experiments_completed = False
-    network_stopped = False
+    network_stopped = not network_required
     try:
-        if os.geteuid() != 0:
-            raise PermissionError(
-                "Mininet requires root privileges. Run this script with the "
-                "environment's Python executable via sudo."
-            )
+        if not network_stopped:
+            if os.geteuid() != 0:
+                raise PermissionError(
+                    "Mininet requires root privileges. Run this script with "
+                    "the environment's Python executable via sudo."
+                )
 
-        mininet_topology = fnss.to_mininet(topology, relabel_nodes=True)
-        host_nodes = sorted(
-            node for node, attributes in topology.nodes(data=True)
-            if attributes.get("type") == "host"
-        )
-        host_names = {
-            node: f"h{index}"
-            for index, node in enumerate(host_nodes, start=1)
-        }
-        net = Mininet(
-            topo=mininet_topology,
-            link=TCLink,
-            controller=OVSController,
-            build=False,
-        )
-        network_needs_cleanup = True
-        net.build()
-        net.start()
+            mininet_topology = fnss.to_mininet(topology, relabel_nodes=True)
+            host_nodes = sorted(
+                node for node, attributes in topology.nodes(data=True)
+                if attributes.get("type") == "host"
+            )
+            host_names = {
+                node: f"h{index}"
+                for index, node in enumerate(host_nodes, start=1)
+            }
+            net = Mininet(
+                topo=mininet_topology,
+                link=TCLink,
+                controller=get_controller_class(config["routing"]["name"]),
+                build=False,
+            )
+            network_needs_cleanup = True
+            network_stopped = False
+            net.build()
+            net.start()
+            summary["routing_setup"] = configure_routing(
+                config["routing"]["name"],
+                net,
+                config["routing"]["parameters"],
+            )
+            write_summary(summary_path, summary)
         for experiment_config in config["experiments"]:
             experiment_name = experiment_config["name"]
-            experiment_result = EXPERIMENTS[experiment_name]["runner"](
-                net,
-                traffic_matrix,
-                host_names,
-                experiment_config["parameters"]["duration_seconds"],
-                run_dir,
-            )
+            experiment_definition = EXPERIMENTS[experiment_name]
+            if experiment_definition["requires_network"]:
+                experiment_result = experiment_definition["runner"](
+                    net,
+                    traffic_matrix,
+                    host_names,
+                    output_dir=run_dir,
+                    **experiment_config["parameters"],
+                )
+            else:
+                experiment_result = experiment_definition["runner"](
+                    topology,
+                    output_dir=run_dir,
+                    **experiment_config["parameters"],
+                )
             summary["experiments"].append(
                 {
                     "name": experiment_name,
