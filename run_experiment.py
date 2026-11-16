@@ -23,7 +23,7 @@ from routing import (
     default_parameters as default_routing_parameters,
     get_controller_class,
 )
-from topologies import clos
+from topologies import clos, rng
 from traffic import uniform_random
 
 
@@ -38,7 +38,11 @@ TOPOLOGIES = {
             "edge_uplink_mbps": 10,
             "aggregation_uplink_mbps": 10,
         },
-    }
+    },
+    "RNG random graph": {
+        "builder": rng.build_topology,
+        "parameters": dict(rng.DEFAULT_PARAMETERS),
+    },
 }
 TRAFFIC_MODELS = {"Uniform random host pairs": uniform_random.build_traffic}
 EXPERIMENTS = {
@@ -227,32 +231,40 @@ def normalize_run_config(config, location):
         **TOPOLOGIES[topology_name]["parameters"],
         **topology_parameters,
     }
-    k = topology_parameters.get("k")
-    if (
-        not isinstance(k, int)
-        or isinstance(k, bool)
-        or k < 2
-        or k % 2
-    ):
-        raise ValueError(
-            f"{location}.topology.parameters.k must be an even integer >= 2"
-        )
-    for parameter in (
-        "host_link_mbps",
-        "edge_uplink_mbps",
-        "aggregation_uplink_mbps",
-    ):
-        capacity = topology_parameters[parameter]
+    if topology_name == "Clos fat-tree":
+        k = topology_parameters.get("k")
         if (
-            not isinstance(capacity, (int, float))
-            or isinstance(capacity, bool)
-            or not math.isfinite(capacity)
-            or capacity <= 0
+            not isinstance(k, int)
+            or isinstance(k, bool)
+            or k < 2
+            or k % 2
         ):
             raise ValueError(
-                f"{location}.topology.parameters.{parameter} must be a "
-                "positive finite number"
+                f"{location}.topology.parameters.k must be an even integer >= 2"
             )
+        for parameter in (
+            "host_link_mbps",
+            "edge_uplink_mbps",
+            "aggregation_uplink_mbps",
+        ):
+            capacity = topology_parameters[parameter]
+            if (
+                not isinstance(capacity, (int, float))
+                or isinstance(capacity, bool)
+                or not math.isfinite(capacity)
+                or capacity <= 0
+            ):
+                raise ValueError(
+                    f"{location}.topology.parameters.{parameter} must be a "
+                    "positive finite number"
+                )
+    elif topology_name == "RNG random graph":
+        try:
+            rng.validate_parameters(**topology_parameters)
+        except ValueError as error:
+            raise ValueError(
+                f"{location}.topology.parameters: {error}"
+            ) from error
 
     traffic_config = require_mapping(
         config.get("traffic", {}),

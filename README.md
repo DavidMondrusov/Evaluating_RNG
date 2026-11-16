@@ -80,3 +80,31 @@ To try Spraypoint on the same measurement path, run
 [experiment-config.spraypoint.json](./experiment-config.spraypoint.json) with
 the `--config` command. It uses a 4-ary Clos topology, one flow, and a
 three-second throughput test.
+
+### RNG topology
+
+`RNG random graph` builds the flat, quasi-random fabric from
+[RNG-paper.pdf](./RNG-paper.pdf): `n` switches, each with `d` fabric uplinks
+wired as a uniformly random, connected, simple `d`-regular graph, and
+`hosts_per_switch` hosts on every switch. Its parameters are `n`, `d`,
+`hosts_per_switch`, `host_link_mbps`, `fabric_link_mbps`, and `seed` (the
+wiring is reproducible per seed; `n * d` must be even). This v1 builds the
+logical switch-to-switch graph directly; the paper's optical ShuffleBoxes are
+not modelled. The graph has cycles, so use it with `Spraypoint` routing: the
+default `OVS controller` learning switch floods ARP around loops. The
+oversubscription experiment only supports Clos layers and rejects RNG.
+
+```bash
+# Full runner path: RNG + Spraypoint + UDP iperf
+sudo /home/rng/mininet-env/bin/python /home/rng/Evaluating_RNG/run_experiment.py \
+  --config /home/rng/Evaluating_RNG/experiment-config.rng.json
+
+# Deploy Spraypoint on an RNG fabric and pingAll (exit 0 on success)
+sudo /home/rng/mininet-env/bin/python /home/rng/Evaluating_RNG/verify_rng.py -n 16 -d 4
+
+# Offline: compile the rules and simulate every host pair, no root needed
+python3 verify_rng.py --dry-run -n 16 -d 4
+
+# Unit tests (offline)
+python3 -m unittest tests/test_rng_topology.py -v
+```
