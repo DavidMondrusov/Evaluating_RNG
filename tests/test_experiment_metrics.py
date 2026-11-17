@@ -4,11 +4,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import fnss
 import networkx
+from mininet.link import TCIntf
 
 from experiments.iperf import _parse_ping_output
 from experiments.oversubscription import analyze, run
-from run_experiment import normalize_run_config
+from run_experiment import normalize_run_config, to_mininet_topology
 from routing import (
     DEFAULT_ROUTING,
     ROUTING_METHODS,
@@ -128,6 +130,33 @@ class ExperimentMetricTests(unittest.TestCase):
 
         self.assertEqual(set(installed), set(fabric.switches))
         self.assertTrue(any(rules.groups for rules in installed.values()))
+
+    def test_mininet_links_keep_fnss_buffer_as_queue_size(self):
+        topology = clos.build_topology(k=4)
+        mininet_topology = to_mininet_topology(topology)
+
+        links = mininet_topology.links(withInfo=True)
+        self.assertEqual(len(links), topology.number_of_edges())
+        for source, target, info in links:
+            self.assertEqual(info.get("max_queue_size"), 50, (source, target))
+            self.assertEqual(info["bw"], 10)
+            self.assertIn("delay", info)
+
+    def test_queue_size_skipped_for_byte_buffers(self):
+        topology = clos.build_topology(k=2)
+        fnss.set_buffer_sizes_constant(topology, 15000, "bytes")
+        mininet_topology = to_mininet_topology(topology)
+
+        for _, _, info in mininet_topology.links(withInfo=True):
+            self.assertNotIn("max_queue_size", info)
+
+    def test_tclink_applies_queue_size_as_netem_limit(self):
+        commands, _ = TCIntf.delayCmds(
+            parent=" root ", delay="1000.0us", max_queue_size=50
+        )
+
+        self.assertEqual(len(commands), 1)
+        self.assertIn("netem delay 1000.0us limit 50", commands[0])
 
     def make_topology(self):
         topology = networkx.Graph()
