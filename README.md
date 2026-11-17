@@ -40,14 +40,16 @@ sudo /home/rng/mininet-env/bin/python /home/rng/Evaluating_RNG/run_experiment.py
 The config format supports a `runs` array; each run can set a `name`, topology
 name and parameters, a routing option, traffic model and parameters, and a
 list of experiments with their parameters. The routing option defaults to
-`OVS controller`; `Spraypoint` is also available as a routing option.
+`OVS controller`; `Spraypoint` and `ECMP shortest path` are also available.
+Use `ECMP shortest path` for `Rail-optimized` and `Jupiter direct-connect`.
 Implementations are registered in the [routing package](./routing). Spraypoint
 uses the local [protocol package](./spraypoint-protocol) unchanged and deploys
 its full-mesh OpenFlow rules after Mininet starts. Its parameters are `p`,
 `h`, `l` (use `null` to derive automatically), and `hash_key`. Spraypoint also
 requires the protocol's documented OVS/OpenFlow support and `arp` utility.
 
-The runner supports `Clos fat-tree`, `Uniform random host pairs`, `UDP iperf
+The runner supports `Clos fat-tree`, `Rail-optimized`, `Jupiter
+direct-connect`, `Uniform random host pairs`, `UDP iperf
 throughput`, and `Topology oversubscription ratio`. Omitted fields use the
 same defaults as the interactive menus (4-ary topology, 8 flows at 1 Mbps,
 seed 1, and 5-second iperf duration). Every run gets its own results
