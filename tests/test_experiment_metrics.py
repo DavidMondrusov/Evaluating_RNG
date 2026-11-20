@@ -37,12 +37,9 @@ from traffic.matching import build_traffic as build_matching_traffic
 
 
 class ExperimentMetricTests(unittest.TestCase):
-    def test_ovs_controller_is_default_routing(self):
-        self.assertEqual(DEFAULT_ROUTING, "OVS controller")
-        self.assertEqual(
-            get_controller_class(DEFAULT_ROUTING).__name__,
-            "OVSController",
-        )
+    def test_ecmp_is_default_routing(self):
+        self.assertEqual(DEFAULT_ROUTING, "ECMP shortest path")
+        self.assertIsNone(get_controller_class(DEFAULT_ROUTING))
         config = normalize_run_config(
             {
                 "experiments": [
@@ -70,6 +67,25 @@ class ExperimentMetricTests(unittest.TestCase):
             config["routing"]["parameters"],
             {"p": 2, "h": 1, "l": None, "hash_key": "spraypoint"},
         )
+
+    def test_ecmp_clos_alias_is_removed(self):
+        self.assertIn("ECMP shortest path", ROUTING_METHODS)
+        self.assertNotIn("ECMP (Clos)", ROUTING_METHODS)
+        self.assertNotIn("OVS controller", ROUTING_METHODS)
+        for removed_name in ("ECMP (Clos)", "OVS controller"):
+            with self.subTest(routing=removed_name):
+                with self.assertRaisesRegex(
+                    ValueError, "routing.name must be one of"
+                ):
+                    normalize_run_config(
+                        {
+                            "routing": {"name": removed_name},
+                            "experiments": [
+                                {"name": "Topology oversubscription ratio"}
+                            ],
+                        },
+                        "test config",
+                    )
 
     def test_spraypoint_adapter_deploys_full_mesh(self):
         spraypoint_routing.load_protocol()

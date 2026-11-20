@@ -38,18 +38,34 @@ TOPOLOGIES = {
             "edge_uplink_mbps": 10,
             "aggregation_uplink_mbps": 10,
         },
+        "validator": clos.validate_parameters,
+        "prompts": ("k",),
     },
     "Rail-optimized": {
         "builder": rail_optimized.build_topology,
         "parameters": dict(rail_optimized.DEFAULT_PARAMETERS),
-        "validate": rail_optimized.validate_parameters,
+        "validator": lambda parameters: rail_optimized.validate_parameters(
+            **parameters
+        ),
+        "prompts": (
+            "scalable_units",
+            "servers_per_unit",
+            "gpus_per_server",
+            "spine_count",
+        ),
     },
     "Jupiter direct-connect": {
         "builder": jupiter.build_topology,
         "parameters": dict(jupiter.DEFAULT_PARAMETERS),
-        "validate": jupiter.validate_parameters,
-        "validator": clos.validate_parameters,
-        "prompts": ("k",),
+        "validator": lambda parameters: jupiter.validate_parameters(
+            **parameters
+        ),
+        "prompts": (
+            "blocks",
+            "middle_blocks",
+            "tors_per_block",
+            "hosts_per_tor",
+        ),
     },
     "Azure Clos": {
         "builder": azure_clos.build_topology,
@@ -274,40 +290,6 @@ def normalize_run_config(config, location):
         **TOPOLOGIES[topology_name]["parameters"],
         **topology_parameters,
     }
-    if topology_name == "Clos fat-tree": # TODO: k is only a parameter for this topology. should we move this validation?
-        k = topology_parameters.get("k")
-        if (
-            not isinstance(k, int)
-            or isinstance(k, bool)
-            or k < 2
-            or k % 2
-        ):
-            raise ValueError(
-                f"{location}.topology.parameters.k must be an even integer >= 2"
-            )
-        for parameter in (
-            "host_link_mbps",
-            "edge_uplink_mbps",
-            "aggregation_uplink_mbps",
-        ):
-            capacity = topology_parameters[parameter]
-            if (
-                not isinstance(capacity, (int, float))
-                or isinstance(capacity, bool)
-                or not math.isfinite(capacity)
-                or capacity <= 0
-            ):
-                raise ValueError(
-                    f"{location}.topology.parameters.{parameter} must be a "
-                    "positive finite number"
-                )
-    else:
-        try:
-            TOPOLOGIES[topology_name]["validate"](**topology_parameters)
-        except ValueError as error:
-            raise ValueError(
-                f"{location}.topology.parameters: {error}"
-            ) from error
     try:
         TOPOLOGIES[topology_name]["validator"](topology_parameters)
     except ValueError as error:
@@ -616,15 +598,6 @@ def run_experiment(config, config_source=None):
         EXPERIMENTS[experiment["name"]]["requires_network"]
         for experiment in config["experiments"]
     )
-    if (
-        network_required
-        and config["routing"]["name"] == DEFAULT_ROUTING
-        and not networkx.is_tree(topology)
-    ):
-        raise ValueError(
-            "OVS controller is an L2 learning switch and cannot forward on a "
-            "fabric with cycles; choose Spraypoint or ECMP (Clos)."
-        )
     traffic_matrix = None
     if network_required:
         traffic_matrix = TRAFFIC_MODELS[traffic_config["name"]]["builder"](
