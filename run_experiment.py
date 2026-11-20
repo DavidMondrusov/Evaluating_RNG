@@ -416,6 +416,38 @@ def topology_snapshot(topology):
     }
 
 
+def to_mininet_topology(topology):
+    """Convert an FNSS topology to a Mininet Topo, keeping link buffer sizes.
+
+    FNSS stores buffer sizes in the "buffer" link attribute, but
+    fnss.to_mininet only reads "buffer_size", so it silently drops them.
+    Copy each buffer into the link's max_queue_size, which TCLink applies as
+    the netem queue limit (in packets) on both interfaces.
+    """
+    mininet_topology = fnss.to_mininet(topology, relabel_nodes=True)
+    if topology.graph.get("buffer_unit") != "packets":
+        # max_queue_size counts packets; fnss.to_mininet discards other units.
+        return mininet_topology
+
+    # Same relabeling as fnss.to_mininet: sorted hosts h1.., sorted switches s1..
+    mininet_names = {}
+    for node_type, prefix in (("host", "h"), ("switch", "s")):
+        nodes = sorted(
+            node for node, attributes in topology.nodes(data=True)
+            if attributes.get("type") == node_type
+        )
+        for index, node in enumerate(nodes, start=1):
+            mininet_names[node] = f"{prefix}{index}"
+
+    for source, target, attributes in topology.edges(data=True):
+        if "buffer" in attributes:
+            link_info = mininet_topology.linkInfo(
+                mininet_names[source], mininet_names[target]
+            )
+            link_info.setdefault("max_queue_size", int(attributes["buffer"]))
+    return mininet_topology
+
+
 def interactive_config():
     print("Network experiment runner")
     topology_name = choose_one("Choose a topology", TOPOLOGIES)
@@ -535,7 +567,7 @@ def run_experiment(config, config_source=None):
                     "the environment's Python executable via sudo."
                 )
 
-            mininet_topology = fnss.to_mininet(topology, relabel_nodes=True)
+            mininet_topology = to_mininet_topology(topology)
             host_nodes = sorted(
                 node for node, attributes in topology.nodes(data=True)
                 if attributes.get("type") == "host"
