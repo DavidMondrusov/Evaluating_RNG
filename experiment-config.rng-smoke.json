@@ -1,0 +1,35 @@
+{
+  "runs": [
+    {
+      "name": "clos-baseline",
+      "topology": {"name": "Clos fat-tree", "parameters": {"k": 4}},
+      "routing": {"name": "ECMP shortest path"},
+      "traffic": {"name": "Uniform random host pairs", "flow_count": 8, "demand_mbps": 1.0, "seed": 1},
+      "experiments": [{"name": "UDP iperf throughput", "duration_seconds": 2}]
+    },
+    {
+      "name": "rng-ecmp",
+      "topology": {"name": "RNG random graph", "parameters": {"n": 8, "d": 3}},
+      "routing": {"name": "ECMP shortest path"},
+      "traffic": {"name": "Uniform random host pairs", "flow_count": 8, "demand_mbps": 1.0, "seed": 1},
+      "experiments": [
+        {"name": "UDP iperf throughput", "duration_seconds": 2},
+        {"name": "Topology oversubscription ratio"}
+      ]
+    },
+    {
+      "name": "rng-spraypoint",
+      "topology": {"name": "RNG random graph", "parameters": {"n": 8, "d": 3}},
+      "routing": {"name": "Spraypoint"},
+      "traffic": {"name": "Uniform random host pairs", "flow_count": 8, "demand_mbps": 1.0, "seed": 1},
+      "experiments": [{"name": "UDP iperf throughput", "duration_seconds": 2}]
+    },
+    {
+      "name": "rng-load-sweep",
+      "topology": {"name": "RNG random graph", "parameters": {"n": 8, "d": 3}},
+      "routing": {"name": "ECMP shortest path"},
+      "traffic": {"name": "Matching host pairs", "demand_mbps": 1.0, "seed": 1},
+      "experiments": [{"name": "Load sweep", "duration_seconds": 2, "active_fractions": [0.5, 1.0]}]
+    }
+  ]
+}
