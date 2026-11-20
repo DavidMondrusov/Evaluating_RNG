@@ -40,19 +40,28 @@ sudo /home/rng/mininet-env/bin/python /home/rng/Evaluating_RNG/run_experiment.py
 The config format supports a `runs` array; each run can set a `name`, topology
 name and parameters, a routing option, traffic model and parameters, and a
 list of experiments with their parameters. The routing option defaults to
-`OVS controller`; `Spraypoint` is also available as a routing option.
+`OVS controller`, an L2 learning switch that only works on loop-free fabrics
+such as k=2. `Spraypoint` and `ECMP (Clos)` handle cyclic Clos fabrics; ECMP
+installs static ARP plus per-destination select groups, with no controller.
 Implementations are registered in the [routing package](./routing). Spraypoint
 uses the local [protocol package](./spraypoint-protocol) unchanged and deploys
 its full-mesh OpenFlow rules after Mininet starts. Its parameters are `p`,
 `h`, `l` (use `null` to derive automatically), and `hash_key`. Spraypoint also
 requires the protocol's documented OVS/OpenFlow support and `arp` utility.
 
-The runner supports `Clos fat-tree`, `Uniform random host pairs`, `UDP iperf
-throughput`, and `Topology oversubscription ratio`. Omitted fields use the
-same defaults as the interactive menus (4-ary topology, 8 flows at 1 Mbps,
-seed 1, and 5-second iperf duration). Every run gets its own results
-directory; if a run fails, the runner records the error and continues with
-later runs, then exits with a non-zero status. See
+The runner supports `Clos fat-tree` and `Azure Clos` topologies; `Uniform
+random host pairs`, `Matching host pairs`, `Hub`, and `Clique` traffic;
+`UDP iperf throughput`, `Load sweep`, and `Topology oversubscription ratio`
+experiments. Omitted fields use the same defaults as the interactive menus
+(4-ary topology, 8 flows at 1 Mbps, seed 1, and 5-second iperf duration).
+
+`Azure Clos` is a scaled two-tier leaf-spine model of Azure's fabric:
+uniform link capacity, 1:1 leaf oversubscription by default (set
+`leaf_oversubscription` for 4:1 and similar), one ECMP path per spine, deep
+buffers, and DC-scale 50 us link delay.
+
+Every run gets its own results directory; if a run fails, the runner records
+the error and continues with later runs, then exits with a non-zero status. See
 [expected-test-results.md](./expected-test-results.md) for the smoke test's
 expected output and pass criteria.
 

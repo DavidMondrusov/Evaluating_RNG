@@ -4,6 +4,25 @@ import math
 import fnss
 
 
+def validate_parameters(parameters):
+    k = parameters["k"]
+    if not isinstance(k, int) or isinstance(k, bool) or k < 2 or k % 2:
+        raise ValueError("k must be an even integer greater than or equal to 2")
+    for name in (
+        "host_link_mbps",
+        "edge_uplink_mbps",
+        "aggregation_uplink_mbps",
+    ):
+        capacity = parameters[name]
+        if (
+            not isinstance(capacity, (int, float))
+            or isinstance(capacity, bool)
+            or not math.isfinite(capacity)
+            or capacity <= 0
+        ):
+            raise ValueError(f"{name} must be a positive finite number")
+
+
 def build_topology(
     k=4,
     host_link_mbps=10,
@@ -11,22 +30,20 @@ def build_topology(
     aggregation_uplink_mbps=10,
 ):
     """Build a configured FNSS fat-tree topology."""
-    if not isinstance(k, int) or isinstance(k, bool) or k < 2 or k % 2:
-        raise ValueError("k must be an even integer greater than or equal to 2")
+    validate_parameters(
+        {
+            "k": k,
+            "host_link_mbps": host_link_mbps,
+            "edge_uplink_mbps": edge_uplink_mbps,
+            "aggregation_uplink_mbps": aggregation_uplink_mbps,
+        }
+    )
 
     capacities = {
         "edge_leaf": host_link_mbps,
         "aggregation_edge": edge_uplink_mbps,
         "core_aggregation": aggregation_uplink_mbps,
     }
-    for link_type, capacity in capacities.items():
-        if (
-            not isinstance(capacity, (int, float))
-            or isinstance(capacity, bool)
-            or not math.isfinite(capacity)
-            or capacity <= 0
-        ):
-            raise ValueError(f"{link_type} capacity must be a positive finite number")
 
     topology = fnss.fat_tree_topology(k=k)
     fnss.set_capacities_constant(topology, host_link_mbps, "Mbps")

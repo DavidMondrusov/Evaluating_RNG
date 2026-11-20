@@ -15,7 +15,7 @@ import mininet
 from mininet.link import TCLink
 from mininet.net import Mininet
 
-from experiments import iperf, oversubscription
+from experiments import iperf, load_sweep, oversubscription
 from routing import (
     DEFAULT_ROUTING,
     ROUTING_METHODS,
@@ -23,8 +23,8 @@ from routing import (
     default_parameters as default_routing_parameters,
     get_controller_class,
 )
-from topologies import clos
-from traffic import uniform_random
+from topologies import azure_clos, clos
+from traffic import clique, hub, matching, uniform_random
 
 
 ROOT = Path(__file__).resolve().parent
@@ -38,14 +38,49 @@ TOPOLOGIES = {
             "edge_uplink_mbps": 10,
             "aggregation_uplink_mbps": 10,
         },
-    }
+        "validator": clos.validate_parameters,
+        "prompts": ("k",),
+    },
+    "Azure Clos": {
+        "builder": azure_clos.build_topology,
+        "parameters": dict(azure_clos.DEFAULT_PARAMETERS),
+        "validator": azure_clos.validate_parameters,
+        "prompts": ("leaves", "spines", "hosts_per_leaf"),
+    },
 }
-TRAFFIC_MODELS = {"Uniform random host pairs": uniform_random.build_traffic}
+TRAFFIC_MODELS = {
+    "Uniform random host pairs": {
+        "builder": uniform_random.build_traffic,
+        "parameters": {"flow_count": 8, "demand_mbps": 1.0, "seed": 1},
+    },
+    "Matching host pairs": {
+        "builder": matching.build_traffic,
+        "parameters": {"demand_mbps": 1.0, "seed": 1},
+    },
+    "Hub": {
+        "builder": hub.build_traffic,
+        "parameters": {"demand_mbps": 1.0, "seed": 1},
+    },
+    "Clique": {
+        "builder": clique.build_traffic,
+        "parameters": {"demand_mbps": 1.0, "seed": 1},
+    },
+}
 EXPERIMENTS = {
     "UDP iperf throughput": {
         "runner": iperf.run,
         "parameters": {"duration_seconds": 5},
         "requires_network": True,
+        "uses_traffic_demand": True,
+    },
+    "Load sweep": {
+        "runner": load_sweep.run,
+        "parameters": {
+            "duration_seconds": 5,
+            "load_fractions": [index / 10 for index in range(11)],
+        },
+        "requires_network": True,
+        "needs_topology": True,
     },
     "Topology oversubscription ratio": {
         "runner": oversubscription.run,
@@ -56,11 +91,6 @@ EXPERIMENTS = {
 DEFAULT_TOPOLOGY = next(iter(TOPOLOGIES))
 DEFAULT_TRAFFIC = next(iter(TRAFFIC_MODELS))
 DEFAULT_EXPERIMENT = next(iter(EXPERIMENTS))
-DEFAULT_TRAFFIC_PARAMETERS = {
-    "flow_count": 8,
-    "demand_mbps": 1.0,
-    "seed": 1,
-}
 
 
 def choose_one(title, choices):
@@ -227,59 +257,44 @@ def normalize_run_config(config, location):
         **TOPOLOGIES[topology_name]["parameters"],
         **topology_parameters,
     }
-    k = topology_parameters.get("k")
-    if (
-        not isinstance(k, int)
-        or isinstance(k, bool)
-        or k < 2
-        or k % 2
-    ):
+    try:
+        TOPOLOGIES[topology_name]["validator"](topology_parameters)
+    except ValueError as error:
         raise ValueError(
-            f"{location}.topology.parameters.k must be an even integer >= 2"
-        )
-    for parameter in (
-        "host_link_mbps",
-        "edge_uplink_mbps",
-        "aggregation_uplink_mbps",
-    ):
-        capacity = topology_parameters[parameter]
-        if (
-            not isinstance(capacity, (int, float))
-            or isinstance(capacity, bool)
-            or not math.isfinite(capacity)
-            or capacity <= 0
-        ):
-            raise ValueError(
-                f"{location}.topology.parameters.{parameter} must be a "
-                "positive finite number"
-            )
+            f"{location}.topology.parameters: {error}"
+        ) from error
 
-    traffic_config = require_mapping(
-        config.get("traffic", {}),
-        f"{location}.traffic",
-        {"name", *DEFAULT_TRAFFIC_PARAMETERS},
-    )
-    traffic_name = traffic_config.get("name", DEFAULT_TRAFFIC)
+    raw_traffic = config.get("traffic", {})
+    if not isinstance(raw_traffic, Mapping):
+        raise ValueError(f"{location}.traffic must be a JSON object")
+    traffic_name = raw_traffic.get("name", DEFAULT_TRAFFIC)
     if not isinstance(traffic_name, str) or traffic_name not in TRAFFIC_MODELS:
         raise ValueError(
             f"{location}.traffic.name must be one of: "
             + ", ".join(TRAFFIC_MODELS)
         )
+    traffic_parameters = TRAFFIC_MODELS[traffic_name]["parameters"]
+    traffic_config = require_mapping(
+        raw_traffic,
+        f"{location}.traffic",
+        {"name", *traffic_parameters},
+    )
     traffic_parameters = {
-        **DEFAULT_TRAFFIC_PARAMETERS,
+        **traffic_parameters,
         **{
             key: value
             for key, value in traffic_config.items()
             if key != "name"
         },
     }
-    flow_count = traffic_parameters["flow_count"]
-    if (
-        not isinstance(flow_count, int)
-        or isinstance(flow_count, bool)
-        or flow_count < 1
-    ):
-        raise ValueError(f"{location}.traffic.flow_count must be a positive integer")
+    if "flow_count" in traffic_parameters:
+        flow_count = traffic_parameters["flow_count"]
+        if (
+            not isinstance(flow_count, int)
+            or isinstance(flow_count, bool)
+            or flow_count < 1
+        ):
+            raise ValueError(f"{location}.traffic.flow_count must be a positive integer")
     demand_mbps = traffic_parameters["demand_mbps"]
     if (
         not isinstance(demand_mbps, (int, float))
@@ -338,6 +353,24 @@ def normalize_run_config(config, location):
                     f"{experiment_location}.duration_seconds must be a "
                     "positive integer"
                 )
+        if "load_fractions" in parameters:
+            fractions = parameters["load_fractions"]
+            if not isinstance(fractions, list) or not fractions:
+                raise ValueError(
+                    f"{experiment_location}.load_fractions must be a "
+                    "non-empty list"
+                )
+            for fraction in fractions:
+                if (
+                    not isinstance(fraction, (int, float))
+                    or isinstance(fraction, bool)
+                    or not math.isfinite(fraction)
+                    or not 0 <= fraction <= 1
+                ):
+                    raise ValueError(
+                        f"{experiment_location}.load_fractions values must be "
+                        "numbers between 0 and 1"
+                    )
         experiments.append(
             {"name": experiment_name, "parameters": parameters}
         )
@@ -439,13 +472,45 @@ def to_mininet_topology(topology):
 def interactive_config():
     print("Network experiment runner")
     topology_name = choose_one("Choose a topology", TOPOLOGIES)
+    topology_parameters = dict(TOPOLOGIES[topology_name]["parameters"])
+    for parameter_name in TOPOLOGIES[topology_name].get("prompts", ()):
+        default = topology_parameters[parameter_name]
+        label = parameter_name.replace("_", " ").capitalize()
+        if parameter_name == "k":
+            while True:
+                value = prompt_positive_int("Clos k (even, >= 2)", default)
+                if value % 2 == 0:
+                    break
+                print("k must be an even integer.")
+        elif isinstance(default, int):
+            value = prompt_positive_int(label, default)
+        else:
+            value = prompt_positive_float(label, default)
+        topology_parameters[parameter_name] = value
     routing_name = choose_one("Choose a routing option", ROUTING_METHODS)
     traffic_name = choose_one("Choose a traffic model", TRAFFIC_MODELS)
     experiment_names = choose_many("Choose experiments to run", EXPERIMENTS)
 
-    flow_count = prompt_positive_int("Number of traffic flows", 8)
-    demand_mbps = prompt_positive_float("Demand per flow (Mbps)", 1.0)
-    seed = prompt_integer("Random seed", 1)
+    traffic_defaults = TRAFFIC_MODELS[traffic_name]["parameters"]
+    traffic = {
+        "name": traffic_name,
+        "demand_mbps": traffic_defaults["demand_mbps"],
+        "seed": traffic_defaults["seed"],
+    }
+    if "flow_count" in traffic_defaults:
+        traffic["flow_count"] = prompt_positive_int(
+            "Number of traffic flows", traffic_defaults["flow_count"]
+        )
+    if any(
+        EXPERIMENTS[name].get("uses_traffic_demand")
+        for name in experiment_names
+    ):
+        traffic["demand_mbps"] = prompt_positive_float(
+            "Demand per flow (Mbps)", traffic_defaults["demand_mbps"]
+        )
+        traffic["seed"] = prompt_integer(
+            "Random seed", traffic_defaults["seed"]
+        )
     experiments = []
     for experiment_name in experiment_names:
         experiment = {"name": experiment_name}
@@ -456,17 +521,15 @@ def interactive_config():
         experiments.append(experiment)
     return normalize_run_config(
         {
-            "topology": {"name": topology_name},
+            "topology": {
+                "name": topology_name,
+                "parameters": topology_parameters,
+            },
             "routing": {
                 "name": routing_name,
                 "parameters": default_routing_parameters(routing_name),
             },
-            "traffic": {
-                "name": traffic_name,
-                "flow_count": flow_count,
-                "demand_mbps": demand_mbps,
-                "seed": seed,
-            },
+            "traffic": traffic,
             "experiments": experiments,
         },
         "interactive run",
@@ -483,13 +546,24 @@ def run_experiment(config, config_source=None):
         EXPERIMENTS[experiment["name"]]["requires_network"]
         for experiment in config["experiments"]
     )
+    if (
+        network_required
+        and config["routing"]["name"] == DEFAULT_ROUTING
+        and not networkx.is_tree(topology)
+    ):
+        raise ValueError(
+            "OVS controller is an L2 learning switch and cannot forward on a "
+            "fabric with cycles; choose Spraypoint or ECMP (Clos)."
+        )
     traffic_matrix = None
     if network_required:
-        traffic_matrix = TRAFFIC_MODELS[traffic_config["name"]](
+        traffic_matrix = TRAFFIC_MODELS[traffic_config["name"]]["builder"](
             topology,
-            flow_count=traffic_config["flow_count"],
-            demand_mbps=traffic_config["demand_mbps"],
-            seed=traffic_config["seed"],
+            **{
+                key: value
+                for key, value in traffic_config.items()
+                if key != "name"
+            },
         )
 
     run_id, run_dir = create_run_directory()
@@ -584,11 +658,17 @@ def run_experiment(config, config_source=None):
             experiment_name = experiment_config["name"]
             experiment_definition = EXPERIMENTS[experiment_name]
             if experiment_definition["requires_network"]:
+                topology_arguments = (
+                    {"topology": topology}
+                    if experiment_definition.get("needs_topology")
+                    else {}
+                )
                 experiment_result = experiment_definition["runner"](
                     net,
                     traffic_matrix,
                     host_names,
                     output_dir=run_dir,
+                    **topology_arguments,
                     **experiment_config["parameters"],
                 )
             else:
