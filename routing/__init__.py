@@ -6,6 +6,7 @@ ROUTING_METHODS = {
     DEFAULT_ROUTING: ovs,
     "Spraypoint": spraypoint,
     "ECMP shortest path": ecmp,
+    "ECMP (Clos)": ecmp,
 }
 
 
