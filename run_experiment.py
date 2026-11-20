@@ -23,7 +23,7 @@ from routing import (
     default_parameters as default_routing_parameters,
     get_controller_class,
 )
-from topologies import azure_clos, clos
+from topologies import azure_clos, clos, jupiter, rail_optimized
 from traffic import clique, hub, matching, uniform_random
 
 
@@ -38,6 +38,16 @@ TOPOLOGIES = {
             "edge_uplink_mbps": 10,
             "aggregation_uplink_mbps": 10,
         },
+    },
+    "Rail-optimized": {
+        "builder": rail_optimized.build_topology,
+        "parameters": dict(rail_optimized.DEFAULT_PARAMETERS),
+        "validate": rail_optimized.validate_parameters,
+    },
+    "Jupiter direct-connect": {
+        "builder": jupiter.build_topology,
+        "parameters": dict(jupiter.DEFAULT_PARAMETERS),
+        "validate": jupiter.validate_parameters,
         "validator": clos.validate_parameters,
         "prompts": ("k",),
     },
@@ -264,6 +274,40 @@ def normalize_run_config(config, location):
         **TOPOLOGIES[topology_name]["parameters"],
         **topology_parameters,
     }
+    if topology_name == "Clos fat-tree": # TODO: k is only a parameter for this topology. should we move this validation?
+        k = topology_parameters.get("k")
+        if (
+            not isinstance(k, int)
+            or isinstance(k, bool)
+            or k < 2
+            or k % 2
+        ):
+            raise ValueError(
+                f"{location}.topology.parameters.k must be an even integer >= 2"
+            )
+        for parameter in (
+            "host_link_mbps",
+            "edge_uplink_mbps",
+            "aggregation_uplink_mbps",
+        ):
+            capacity = topology_parameters[parameter]
+            if (
+                not isinstance(capacity, (int, float))
+                or isinstance(capacity, bool)
+                or not math.isfinite(capacity)
+                or capacity <= 0
+            ):
+                raise ValueError(
+                    f"{location}.topology.parameters.{parameter} must be a "
+                    "positive finite number"
+                )
+    else:
+        try:
+            TOPOLOGIES[topology_name]["validate"](**topology_parameters)
+        except ValueError as error:
+            raise ValueError(
+                f"{location}.topology.parameters: {error}"
+            ) from error
     try:
         TOPOLOGIES[topology_name]["validator"](topology_parameters)
     except ValueError as error:

@@ -1,133 +1,61 @@
-"""Loop-free ECMP for a Clos fabric.
+"""Static ECMP over shortest paths: each switch hashes flows across all
+neighbors one hop closer to the destination host's switch."""
 
-Approximates a routed leaf-spine: static ARP (ARP suppression), controllers
-detached, and per-destination select groups across equal-cost next hops.
-No TTL decrement or per-hop MAC rewrite.
-"""
+import os
+import tempfile
 
-import shlex
-from collections import deque
+import networkx
+from mininet.node import OVSSwitch
 
 
 DEFAULT_PARAMETERS = {}
-OFCTL = "ovs-ofctl -O OpenFlow13"
 
 
 def controller_class():
     return None
 
 
-def _run(switch, command):
-    output = switch.cmd(f"{command}; echo __rc=$?")
-    body, _, status = output.rpartition("__rc=")
-    if status.strip() != "0":
-        raise RuntimeError(f"{switch.name}: {body.strip()}")
-    return body
-
-
-def _switch_adjacency(net):
-    switches = set(net.switches)
-    adjacency = {switch: {} for switch in net.switches}
-    for switch in net.switches:
-        for port, intf in switch.intfs.items():
-            link = intf.link
-            if link is None:
-                continue
-            peer = link.intf1 if link.intf2 is intf else link.intf2
-            if peer.node in switches:
-                adjacency[switch][peer.node] = port
-    return adjacency
-
-
-def _host_attachments(net):
-    attachments = {}
-    for host in net.hosts:
-        intf = host.defaultIntf()
-        peer = intf.link.intf1 if intf.link.intf2 is intf else intf.link.intf2
-        port = peer.node.ports[peer]
-        attachments[host] = (peer.node, port)
-    return attachments
-
-
-def _distances(adjacency, root):
-    distances = {root: 0}
-    queue = deque([root])
-    while queue:
-        node = queue.popleft()
-        for neighbour in adjacency[node]:
-            if neighbour not in distances:
-                distances[neighbour] = distances[node] + 1
-                queue.append(neighbour)
-    return distances
-
-
 def configure(net, parameters):
-    adjacency = _switch_adjacency(net)
-    attachments = _host_attachments(net)
-    net.staticArp()
+    graph = networkx.Graph()
+    ports = {}  # (node, neighbor) -> OpenFlow port on node
+    for link in net.links:
+        a, b = link.intf1, link.intf2
+        graph.add_edge(a.node.name, b.node.name)
+        ports[a.node.name, b.node.name] = a.node.ports[a]
+        ports[b.node.name, a.node.name] = b.node.ports[b]
+    switches = [s for s in net.switches if isinstance(s, OVSSwitch)]
+    fabric = graph.subgraph(s.name for s in switches)
 
-    for switch in net.switches:
-        bridge = shlex.quote(switch.name)
-        _run(
-            switch,
-            f"ovs-vsctl set bridge {bridge} "
-            "protocols=OpenFlow10,OpenFlow13 stp_enable=false "
-            f"-- set-fail-mode {bridge} secure",
-        )
-        _run(switch, f"ovs-vsctl del-controller {bridge}")
-        _run(switch, f"{OFCTL} del-flows {bridge}")
-        _run(switch, f"{OFCTL} del-groups {bridge}")
-        _run(switch, f"{OFCTL} add-flow {bridge} priority=0,actions=drop")
-
-    flows = 0
-    groups = 0
-    for group_id, host in enumerate(
-        sorted(net.hosts, key=lambda node: node.name), start=1
-    ):
-        mac = host.MAC()
-        attachment_switch, attachment_port = attachments[host]
-        distances = _distances(adjacency, attachment_switch)
-        for switch in net.switches:
-            bridge = shlex.quote(switch.name)
-            if switch is attachment_switch:
-                flow = (
-                    f"priority=100,dl_dst={mac},"
-                    f"actions=output:{attachment_port}"
-                )
-            elif switch in distances:
-                next_hops = [
-                    port
-                    for neighbour, port in adjacency[switch].items()
-                    if distances.get(neighbour) == distances[switch] - 1
-                ]
-                if not next_hops:
-                    continue
-                if len(next_hops) == 1:
-                    flow = (
-                        f"priority=100,dl_dst={mac},"
-                        f"actions=output:{next_hops[0]}"
-                    )
-                else:
-                    buckets = ",".join(
-                        f"bucket=actions=output:{port}"
-                        for port in next_hops
-                    )
-                    spec = f"group_id={group_id},type=select,{buckets}"
-                    _run(
-                        switch,
-                        f"{OFCTL} add-group {bridge} {shlex.quote(spec)}",
-                    )
-                    groups += 1
-                    flow = f"priority=100,dl_dst={mac},actions=group:{group_id}"
+    flows = {s.name: [] for s in switches}
+    groups = {s.name: {} for s in switches}  # port tuple -> group id
+    for host in net.hosts:
+        (edge,) = [n for n in graph.neighbors(host.name) if n in fabric]
+        distance = networkx.single_source_shortest_path_length(fabric, edge)
+        for switch in fabric:
+            if switch == edge:
+                out = [ports[edge, host.name]]
             else:
-                continue
-            _run(switch, f"{OFCTL} add-flow {bridge} {shlex.quote(flow)}")
-            flows += 1
+                out = sorted(
+                    ports[switch, n] for n in fabric.neighbors(switch)
+                    if distance.get(n) == distance[switch] - 1
+                )
+            if len(out) == 1:
+                action = f"output:{out[0]}"
+            else:
+                group_id = groups[switch].setdefault(tuple(out), len(groups[switch]) + 1)
+                action = f"group:{group_id}"
+            flows[switch].append(f"priority=100,ip,nw_dst={host.IP()},actions={action}")
 
-    return {
-        "deployed": True,
-        "deployment_mode": "ecmp",
-        "switch_count": len(net.switches),
-        "flow_count": flows,
-        "group_count": groups,
-    }
+    for switch in switches:
+        switch.cmd(f"ovs-vsctl set bridge {switch.name} protocols=OpenFlow13")
+        for out, group_id in groups[switch.name].items():
+            buckets = ",".join(f"bucket=actions=output:{p}" for p in out)
+            switch.cmd(f"ovs-ofctl -O OpenFlow13 add-group {switch.name} "
+                       f"group_id={group_id},type=select,{buckets}")
+        fd, path = tempfile.mkstemp()
+        with os.fdopen(fd, "w") as flow_file:
+            flow_file.write("\n".join(flows[switch.name]) + "\n")
+        switch.cmd(f"ovs-ofctl -O OpenFlow13 add-flows {switch.name} {path}")
+        os.unlink(path)
+    net.staticArp()
+    return {"deployed": True, "flow_count": sum(len(f) for f in flows.values())}
