@@ -40,27 +40,69 @@ sudo /home/rng/mininet-env/bin/python /home/rng/Evaluating_RNG/run_experiment.py
 The config format supports a `runs` array; each run can set a `name`, topology
 name and parameters, a routing option, traffic model and parameters, and a
 list of experiments with their parameters. The routing option defaults to
-`OVS controller`; `Spraypoint` is also available as a routing option.
-Implementations are registered in the [routing package](./routing). Spraypoint
-uses the local [protocol package](./spraypoint-protocol) unchanged and deploys
-its full-mesh OpenFlow rules after Mininet starts. Its parameters are `p`,
-`h`, `l` (use `null` to derive automatically), and `hash_key`. Spraypoint also
-requires the protocol's documented OVS/OpenFlow support and `arp` utility.
+`ECMP shortest path`; `Spraypoint` is also available. Implementations are
+registered in the [routing package](./routing). Spraypoint uses the local
+[protocol package](./spraypoint-protocol) unchanged and deploys its full-mesh
+OpenFlow rules after Mininet starts. Its parameters are `p`, `h`, `l` (use
+`null` to derive automatically), and `hash_key`. Spraypoint also requires the
+protocol's documented OVS/OpenFlow support and `arp` utility.
 
-The runner supports `Clos fat-tree`, `Uniform random host pairs`, `UDP iperf
-throughput`, and `Topology oversubscription ratio`. Omitted fields use the
-same defaults as the interactive menus (4-ary topology, 8 flows at 1 Mbps,
-seed 1, and 5-second iperf duration). Every run gets its own results
+The runner supports `Clos fat-tree`, `Azure Clos`, `Rail-optimized`, and
+`Jupiter direct-connect` topologies; `Uniform random host pairs`, `Matching
+host pairs`, `Hub`, and `Clique` traffic; and `UDP iperf throughput`, `Load
+sweep`, and `Topology oversubscription ratio` experiments. Omitted fields use
+the same defaults as the interactive menus (4-ary topology, 8 flows at
+1 Mbps, seed 1, and 5-second iperf duration). Every run gets its own results
 directory; if a run fails, the runner records the error and continues with
 later runs, then exits with a non-zero status. See
 [expected-test-results.md](./expected-test-results.md) for the smoke test's
 expected output and pass criteria.
+
+`Azure Clos` is a scaled two-tier leaf-spine model of Azure's fabric:
+uniform link capacity, 1:1 leaf oversubscription by default (set
+`leaf_oversubscription` for 4:1 and similar), one ECMP path per spine, deep
+buffers, and DC-scale 50 us link delay.
+The interactive prompt accepts `leaf_oversubscription`; for example, enter
+`3` to make aggregate host-link capacity per leaf three times its aggregate
+leaf-to-spine capacity. This is a local leaf ratio, not the paper's network-wide
+worst-case oversubscription ratio.
 
 UDP iperf tests each selected traffic flow in turn. The runner records an idle
 ICMP ping baseline, then runs another ping probe concurrently with each flow
 to capture loaded packet loss and RTT. Both measurements are included with the
 iperf results. Client, server, and ping output are kept in `iperf.log`. Each
 iperf flow is bounded by its configured duration plus a 15-second timeout.
+
+The load sweep estimates a paper-style oversubscription ratio for each active
+fraction of leaf switches. It rebuilds the selected traffic pattern using the
+seeded subset of leaves, so the traffic matrix endpoints are leaves. Each
+leaf-pair demand is carried by host-to-host iperf subflows: the source leaf's
+aggregate host-link capacity is divided among its outgoing leaf pairs and then
+among its attached hosts. Host endpoints are chosen on different leaves.
+`oversubscription_ratio` is the inverse of the minimum delivered/offered rate
+fraction across leaf pairs; this worst-pair metric is the one closest to the
+paper's worst-flow measure. Zero delivered throughput for a pair is reported
+as `inf`. `aggregate_offered_to_delivered_ratio` is total offered Mbps divided
+by total delivered Mbps for the matrix; it can hide an individual pair that
+gets very little service. Both metrics are reported in the CSV and results.
+`matrix_repetitions` can be increased to report the mean, minimum, and maximum
+ratio across independent traffic matrices. The default is one repetition to
+keep Mininet runs practical; the paper used 100 matrices for its plotted
+statistics. Active fractions that round to the same number of leaves are
+measured only once, and the CSV reports the resulting actual fraction.
+Matching traffic requires an even number of leaves, so an odd active count is
+rounded down to the nearest even count.
+
+Each active-fraction result also includes aggregate offered, sent, and
+delivered Mbps, `failed_flow_count`, and packet loss. A client that exits
+unsuccessfully or times out without usable counters contributes zero delivered
+throughput and is counted as failed; the sweep continues. Raw client, server,
+and ping output is recorded in `load-sweep.log`. Delivered throughput is taken
+from iperf's server-side receiver intervals, not the client's offered/send
+rate; intervals are aggregated because some iperf3 versions report an empty
+final receiver summary.
+This is an empirical estimate using iperf and the selected routing, not the
+paper's exact multicommodity-flow LP.
 
 ### Comparing performance and oversubscription
 

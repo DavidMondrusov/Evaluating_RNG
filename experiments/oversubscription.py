@@ -6,6 +6,10 @@ from pathlib import Path
 SWITCH_LINK_TYPES = {
     "edge": ("edge_leaf", "aggregation_edge"),
     "aggregation": ("aggregation_edge", "core_aggregation"),
+    "leaf": ("host_leaf", "leaf_spine"),
+    "tor": ("host_tor", "tor_middle_block"),
+    "middle_block": ("tor_middle_block", "dcni"),
+    "rng": ("host_link", "fabric"),
 }
 
 
@@ -32,7 +36,7 @@ def analyze(topology):
             continue
 
         layer = node_attributes.get("layer")
-        if layer == "core":
+        if layer in ("core", "spine"):
             continue
         if layer not in SWITCH_LINK_TYPES:
             raise ValueError(

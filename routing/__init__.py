@@ -1,9 +1,9 @@
-from . import ovs, spraypoint
+from . import ecmp, spraypoint
 
 
-DEFAULT_ROUTING = "OVS controller"
+DEFAULT_ROUTING = "ECMP shortest path"
 ROUTING_METHODS = {
-    DEFAULT_ROUTING: ovs,
+    DEFAULT_ROUTING: ecmp,
     "Spraypoint": spraypoint,
 }
 
