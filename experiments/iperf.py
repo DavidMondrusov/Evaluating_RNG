@@ -18,6 +18,10 @@ PING_METRIC_NAMES = (
 )
 
 
+class IperfResultError(RuntimeError):
+    """Raised when iperf3 did not produce usable result counters."""
+
+
 def _read_output(process, timeout):
     try:
         stdout, _ = process.communicate(timeout=timeout)
@@ -69,24 +73,93 @@ def _parse_ping_output(output):
 def _iperf_json(output, flow_id, log_name):
     start = output.find("{")
     if start < 0:
-        raise RuntimeError(
+        raise IperfResultError(
             f"iperf3 returned no JSON result for flow {flow_id}; "
             f"see {log_name}"
         )
-    data, _ = json.JSONDecoder().raw_decode(output[start:])
+    try:
+        data, _ = json.JSONDecoder().raw_decode(output[start:])
+    except json.JSONDecodeError as error:
+        raise IperfResultError(
+            f"iperf3 returned invalid JSON for flow {flow_id}; "
+            f"see {log_name}"
+        ) from error
+    if not isinstance(data, dict):
+        raise IperfResultError(
+            f"iperf3 returned an unexpected JSON result for flow {flow_id}; "
+            f"see {log_name}"
+        )
     if "error" in data:
-        raise RuntimeError(
+        raise IperfResultError(
             f"iperf3 error for flow {flow_id}: {data['error']}"
         )
     return data
 
 
 def _iperf_rates(data):
-    end = data["end"]
-    received = end.get("sum_received") or end["sum"]
+    if not isinstance(data, dict):
+        raise IperfResultError("iperf3 result is not a JSON object")
+    end = data.get("end")
+    if not isinstance(end, dict):
+        raise IperfResultError("iperf3 result has no end summary")
+    sent = end.get("sum_sent") or end.get("sum")
+    server_output = data.get("server_output_json")
+    server_end = (
+        server_output.get("end")
+        if isinstance(server_output, dict)
+        else None
+    )
+    received = end.get("sum_received")
+    if isinstance(server_output, dict):
+        received_bytes = 0
+        received_seconds = 0
+        intervals = server_output.get("intervals")
+        if isinstance(intervals, list):
+            for interval in intervals:
+                if not isinstance(interval, dict) or interval.get("omitted"):
+                    continue
+                interval_sum = interval.get("sum")
+                if not isinstance(interval_sum, dict) or interval_sum.get(
+                    "omitted"
+                ):
+                    continue
+                bytes_received = interval_sum.get("bytes")
+                seconds = interval_sum.get("seconds")
+                if (
+                    isinstance(bytes_received, (int, float))
+                    and not isinstance(bytes_received, bool)
+                    and isinstance(seconds, (int, float))
+                    and not isinstance(seconds, bool)
+                    and seconds > 0
+                ):
+                    received_bytes += bytes_received
+                    received_seconds += seconds
+        if received_seconds > 0:
+            received = {
+                "bits_per_second": (
+                    received_bytes * 8 / received_seconds
+                )
+            }
+    if received is None and isinstance(server_end, dict):
+        received = server_end.get("sum_received") or server_end.get("sum")
+    missing = []
+    if not isinstance(received, dict) or not isinstance(
+        received.get("bits_per_second"), (int, float)
+    ):
+        missing.append("receiver sum")
+    if not isinstance(sent, dict) or not isinstance(
+        sent.get("bits_per_second"), (int, float)
+    ):
+        missing.append("sum_sent/sum")
+    if missing:
+        end_fields = ", ".join(sorted(end)) or "none"
+        raise IperfResultError(
+            "iperf3 result is missing rate summaries "
+            f"({', '.join(missing)}); end fields: {end_fields}"
+        )
     return (
         received["bits_per_second"] / 1e6,
-        end["sum"]["bits_per_second"] / 1e6,
+        sent["bits_per_second"] / 1e6,
     )
 
 
@@ -130,7 +203,7 @@ def _run_flow(client, server, demand_mbps, duration_seconds, log_file, flow_id):
     )
     port = str(_port(flow_id))
     server_process = server.popen(
-        ["iperf3", "-s", "-1", "-p", port],
+        ["iperf3", "-s", "-1", "-J", "-p", port],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -178,6 +251,7 @@ def _run_flow(client, server, demand_mbps, duration_seconds, log_file, flow_id):
                 "-l",
                 str(_block_size(demand_mbps)),
                 "-J",
+                "--get-server-output",
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -239,6 +313,7 @@ def _run_flow(client, server, demand_mbps, duration_seconds, log_file, flow_id):
         client_rate,
         idle_latency,
         _parse_ping_output(ping_output),
+        None,
     )
 
 
@@ -289,12 +364,15 @@ def run_flows_concurrently(
 
     servers = {
         flow_id: net.get(host_names[destination]).popen(
-            ["iperf3", "-s", "-1", "-p", str(_port(flow_id))],
+            ["iperf3", "-s", "-1", "-J", "-p", str(_port(flow_id))],
             **PROCESS_KWARGS,
         )
         for flow_id, (_, destination, _) in flows.items()
     }
     clients, pings, outputs = {}, {}, {}
+    client_read_errors = {}
+    ping_read_errors = {}
+    server_output = {}
     try:
         time.sleep(0.2)
         for flow_id, (source, destination, demand_mbps) in flows.items():
@@ -319,6 +397,7 @@ def run_flows_concurrently(
                     "-l",
                     str(_block_size(demand_mbps)),
                     "-J",
+                    "--get-server-output",
                 ],
                 **PROCESS_KWARGS,
             )
@@ -327,15 +406,31 @@ def run_flows_concurrently(
                 **PROCESS_KWARGS,
             )
         for flow_id in flows:
-            outputs[flow_id] = (
-                _read_output(clients[flow_id], duration_seconds + 15),
-                _read_output(pings[flow_id], duration_seconds + 5),
-            )
+            try:
+                client_output = _read_output(
+                    clients[flow_id], duration_seconds + 15
+                )
+            except subprocess.TimeoutExpired as error:
+                client_output = error.output or ""
+                client_read_errors[flow_id] = (
+                    f"iperf3 client timed out after "
+                    f"{duration_seconds + 15} seconds"
+                )
+            try:
+                ping_output = _read_output(
+                    pings[flow_id], duration_seconds + 5
+                )
+            except subprocess.TimeoutExpired as error:
+                ping_output = error.output or ""
+                ping_read_errors[flow_id] = (
+                    f"ping probe timed out after {duration_seconds + 5} "
+                    "seconds"
+                )
+            outputs[flow_id] = (client_output, ping_output)
     finally:
         for process in (*clients.values(), *pings.values()):
             if process.poll() is None:
                 process.kill()
-        server_output = {}
         for flow_id, process in servers.items():
             if process.poll() is None:
                 process.send_signal(signal.SIGINT)
@@ -348,19 +443,60 @@ def run_flows_concurrently(
     measured = {}
     for flow_id, (source, destination, demand_mbps) in flows.items():
         client_output, ping_output = outputs[flow_id]
-        server_rate, client_rate = _iperf_rates(
-            _iperf_json(client_output, flow_id, log_file.name)
+        client_exit_code = clients[flow_id].poll()
+        log_file.write(
+            f"--- Flow {flow_id} details ---\n"
+            f"source={source}, destination={destination}, "
+            f"offered_mbps={demand_mbps}, duration_seconds={duration_seconds}, "
+            f"port={_port(flow_id)}, "
+            f"client_exit_code={client_exit_code}, "
+            f"client_read_error={client_read_errors.get(flow_id)}, "
+            f"ping_exit_code={pings[flow_id].poll()}, "
+            f"ping_read_error={ping_read_errors.get(flow_id)}, "
+            f"server_exit_code={servers[flow_id].poll()}\n"
+            f"--- Flow {flow_id} client output ---\n{client_output}\n"
+            f"--- Flow {flow_id} ping output ---\n{ping_output}\n"
+            f"--- Flow {flow_id} server output ---\n{server_output[flow_id]}\n"
         )
+        log_file.flush()
+        failure_reason = client_read_errors.get(flow_id)
+        try:
+            server_rate, client_rate = _iperf_rates(
+                _iperf_json(client_output, flow_id, log_file.name)
+            )
+        except IperfResultError as error:
+            if client_exit_code in (None, 0) and flow_id not in client_read_errors:
+                raise
+            server_rate = client_rate = 0.0
+            failure_reason = failure_reason or str(error)
+        if client_exit_code not in (None, 0):
+            failure_reason = failure_reason or (
+                f"iperf3 client exited with status {client_exit_code}"
+            )
+        if failure_reason is not None:
+            log_file.write(
+                f"--- Flow {flow_id} measurement failure ---\n"
+                f"client_exit_code={client_exit_code}\n"
+                f"reason={failure_reason}\n"
+            )
+            log_file.flush()
+        try:
+            loaded_latency = _parse_ping_output(ping_output)
+        except RuntimeError as error:
+            loaded_latency = {
+                metric_name: None for metric_name in PING_METRIC_NAMES
+            }
+            log_file.write(
+                f"--- Flow {flow_id} ping measurement failure ---\n"
+                f"reason={ping_read_errors.get(flow_id, str(error))}\n"
+            )
+            log_file.flush()
         measured[flow_id] = (
             server_rate,
             client_rate,
             idle_latency[flow_id],
-            _parse_ping_output(ping_output),
-        )
-        log_file.write(
-            f"--- Flow {flow_id} client output ---\n{client_output}\n"
-            f"--- Flow {flow_id} ping output ---\n{ping_output}\n"
-            f"--- Flow {flow_id} server output ---\n{server_output[flow_id]}\n"
+            loaded_latency,
+            failure_reason,
         )
     return measured
 
@@ -374,6 +510,7 @@ COLUMNS = (
     "offered_mbps",
     "server_received_rate",
     "client_reported_rate",
+    "flow_failed",
     *(
         f"{phase}_ping_{metric}"
         for phase in ("idle", "loaded")
@@ -383,7 +520,13 @@ COLUMNS = (
 
 
 def _result(flow_id, source, destination, host_names, demand_mbps, measured):
-    server_rate, client_rate, idle_latency, loaded_latency = measured
+    (
+        server_rate,
+        client_rate,
+        idle_latency,
+        loaded_latency,
+        failure_reason,
+    ) = measured
     return {
         "flow_id": flow_id,
         "source_node": str(source),
@@ -393,6 +536,7 @@ def _result(flow_id, source, destination, host_names, demand_mbps, measured):
         "offered_mbps": float(demand_mbps),
         "server_received_rate": server_rate,
         "client_reported_rate": client_rate,
+        "flow_failed": failure_reason is not None,
         "idle_latency": idle_latency,
         "loaded_latency": loaded_latency,
     }

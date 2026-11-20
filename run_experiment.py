@@ -45,7 +45,12 @@ TOPOLOGIES = {
         "builder": azure_clos.build_topology,
         "parameters": dict(azure_clos.DEFAULT_PARAMETERS),
         "validator": azure_clos.validate_parameters,
-        "prompts": ("leaves", "spines", "hosts_per_leaf"),
+        "prompts": (
+            "leaves",
+            "spines",
+            "hosts_per_leaf",
+            "leaf_oversubscription",
+        ),
     },
 }
 TRAFFIC_MODELS = {
@@ -77,10 +82,12 @@ EXPERIMENTS = {
         "runner": load_sweep.run,
         "parameters": {
             "duration_seconds": 5,
-            "load_fractions": [index / 10 for index in range(11)],
+            "active_fractions": [index / 10 for index in range(1, 11)],
+            "matrix_repetitions": 1,
         },
         "requires_network": True,
         "needs_topology": True,
+        "needs_traffic_model": True,
     },
     "Topology oversubscription ratio": {
         "runner": oversubscription.run,
@@ -353,11 +360,11 @@ def normalize_run_config(config, location):
                     f"{experiment_location}.duration_seconds must be a "
                     "positive integer"
                 )
-        if "load_fractions" in parameters:
-            fractions = parameters["load_fractions"]
+        if "active_fractions" in parameters:
+            fractions = parameters["active_fractions"]
             if not isinstance(fractions, list) or not fractions:
                 raise ValueError(
-                    f"{experiment_location}.load_fractions must be a "
+                    f"{experiment_location}.active_fractions must be a "
                     "non-empty list"
                 )
             for fraction in fractions:
@@ -365,12 +372,23 @@ def normalize_run_config(config, location):
                     not isinstance(fraction, (int, float))
                     or isinstance(fraction, bool)
                     or not math.isfinite(fraction)
-                    or not 0 <= fraction <= 1
+                    or not 0 < fraction <= 1
                 ):
                     raise ValueError(
-                        f"{experiment_location}.load_fractions values must be "
-                        "numbers between 0 and 1"
+                        f"{experiment_location}.active_fractions values must "
+                        "be numbers greater than 0 and at most 1"
                     )
+        if "matrix_repetitions" in parameters:
+            repetitions = parameters["matrix_repetitions"]
+            if (
+                not isinstance(repetitions, int)
+                or isinstance(repetitions, bool)
+                or repetitions < 1
+            ):
+                raise ValueError(
+                    f"{experiment_location}.matrix_repetitions must be a "
+                    "positive integer"
+                )
         experiments.append(
             {"name": experiment_name, "parameters": parameters}
         )
@@ -482,6 +500,10 @@ def interactive_config():
                 if value % 2 == 0:
                     break
                 print("k must be an even integer.")
+        elif parameter_name == "leaf_oversubscription":
+            value = prompt_positive_float(
+                "Leaf host-to-uplink oversubscription ratio", default
+            )
         elif isinstance(default, int):
             value = prompt_positive_int(label, default)
         else:
@@ -517,6 +539,10 @@ def interactive_config():
         if "duration_seconds" in EXPERIMENTS[experiment_name]["parameters"]:
             experiment["duration_seconds"] = prompt_positive_int(
                 "UDP iperf duration per flow (seconds)", 5
+            )
+        if experiment_name == "Load sweep":
+            experiment["matrix_repetitions"] = prompt_positive_int(
+                "Traffic matrices per active fraction", 1
             )
         experiments.append(experiment)
     return normalize_run_config(
@@ -663,6 +689,20 @@ def run_experiment(config, config_source=None):
                     if experiment_definition.get("needs_topology")
                     else {}
                 )
+                if experiment_definition.get("needs_traffic_model"):
+                    topology_arguments.update(
+                        {
+                            "traffic_name": traffic_config["name"],
+                            "traffic_builder": TRAFFIC_MODELS[
+                                traffic_config["name"]
+                            ]["builder"],
+                            "traffic_parameters": {
+                                key: value
+                                for key, value in traffic_config.items()
+                                if key != "name"
+                            },
+                        }
+                    )
                 experiment_result = experiment_definition["runner"](
                     net,
                     traffic_matrix,
