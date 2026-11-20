@@ -3,6 +3,8 @@ import ipaddress
 import sys
 from pathlib import Path
 
+from . import ovs_batch
+
 
 PROTOCOL_ROOT = Path(__file__).resolve().parent.parent / "spraypoint-protocol"
 DEFAULT_PARAMETERS = {
@@ -100,8 +102,16 @@ def configure(net, parameters):
     SpraypointDeployer, SpraypointParams = load_protocol()
 
     params = SpraypointParams(**parameters)
-    deployer = SpraypointDeployer(net, params)
-    installed = deployer.deploy_full_mesh()
+    deployer = SpraypointDeployer(net, params, static_arp=False)
+    installed = deployer.compiler.compile_full_mesh()
+    ovs_batch.install({
+        name: (
+            [rules.groups[group_id].to_ofctl() for group_id in sorted(rules.groups)],
+            [flow.to_ofctl() for flow in rules.flows],
+        )
+        for name, rules in installed.items()
+    })
+    ovs_batch.install_static_arp(net)
     return {
         "deployed": True,
         "switch_count": len(installed),

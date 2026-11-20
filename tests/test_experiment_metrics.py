@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import fnss
 import networkx
@@ -92,18 +92,22 @@ class ExperimentMetricTests(unittest.TestCase):
         import spraypoint
 
         installed = {
-            "s1": SimpleNamespace(flows=[1, 2], groups={1: object()}),
-            "s2": SimpleNamespace(flows=[3], groups={}),
+            "s1": SimpleNamespace(flows=[MagicMock(), MagicMock()], groups={1: MagicMock()}),
+            "s2": SimpleNamespace(flows=[MagicMock()], groups={}),
         }
-        with patch.object(spraypoint, "SpraypointDeployer") as deployer_class:
-            deployer_class.return_value.deploy_full_mesh.return_value = installed
+        with patch.object(spraypoint, "SpraypointDeployer") as deployer_class, patch.object(
+            spraypoint_routing.ovs_batch, "install"
+        ) as install, patch.object(spraypoint_routing.ovs_batch, "install_static_arp"):
+            compiler = deployer_class.return_value.compiler
+            compiler.compile_full_mesh.return_value = installed
             result = spraypoint_routing.configure(
                 object(),
                 {"p": 2, "h": 1, "l": None, "hash_key": "test"},
             )
 
         deployer_class.assert_called_once()
-        deployer_class.return_value.deploy_full_mesh.assert_called_once_with()
+        compiler.compile_full_mesh.assert_called_once_with()
+        self.assertEqual(sorted(install.call_args[0][0]), ["s1", "s2"])
         self.assertEqual(result["deployment_mode"], "full_mesh")
         self.assertEqual(result["switch_count"], 2)
         self.assertEqual(result["flow_count"], 3)
