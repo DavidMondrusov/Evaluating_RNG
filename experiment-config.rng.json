@@ -1,0 +1,39 @@
+{
+  "runs": [
+    {
+      "name": "rng-spraypoint-smoke",
+      "topology": {
+        "name": "RNG random graph",
+        "parameters": {
+          "n": 8,
+          "d": 3,
+          "hosts_per_switch": 1,
+          "host_link_mbps": 10,
+          "fabric_link_mbps": 10,
+          "seed": 1
+        }
+      },
+      "routing": {
+        "name": "Spraypoint",
+        "parameters": {
+          "p": 2,
+          "h": 1,
+          "l": null,
+          "hash_key": "spraypoint"
+        }
+      },
+      "traffic": {
+        "name": "Uniform random host pairs",
+        "flow_count": 4,
+        "demand_mbps": 1.0,
+        "seed": 1
+      },
+      "experiments": [
+        {
+          "name": "UDP iperf throughput",
+          "duration_seconds": 3
+        }
+      ]
+    }
+  ]
+}

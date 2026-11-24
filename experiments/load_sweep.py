@@ -6,16 +6,23 @@ from pathlib import Path
 from . import iperf
 
 
+# Switch layer -> link type that attaches its hosts.
+HOST_LINK_TYPES = {
+    "edge": "edge_leaf",
+    "rng": "host_link",
+}
+
+
 def _leaf_hosts(topology):
     leaves = sorted(
         node
         for node, attributes in topology.nodes(data=True)
         if attributes.get("type") == "switch"
-        and attributes.get("layer") == "edge"
+        and attributes.get("layer") in HOST_LINK_TYPES
     )
     hosts_by_leaf = {leaf: [] for leaf in leaves}
     for source, target, attributes in topology.edges(data=True):
-        if attributes.get("type") != "edge_leaf":
+        if attributes.get("type") not in HOST_LINK_TYPES.values():
             continue
         leaf, host = (
             (source, target)
@@ -23,7 +30,7 @@ def _leaf_hosts(topology):
             else (target, source)
         )
         if leaf not in hosts_by_leaf or topology.nodes[host].get("type") != "host":
-            raise ValueError("Topology has an invalid edge_leaf connection")
+            raise ValueError("Topology has an invalid host-to-leaf connection")
         hosts_by_leaf[leaf].append(host)
     if len(leaves) < 2 or any(not hosts for hosts in hosts_by_leaf.values()):
         raise ValueError("Load sweep requires at least two leaves with hosts")
@@ -59,7 +66,7 @@ def _traffic_for_active_leaves(
 def _host_capacity(topology):
     capacities = {}
     for source, target, attributes in topology.edges(data=True):
-        if attributes.get("type") != "edge_leaf":
+        if attributes.get("type") not in HOST_LINK_TYPES.values():
             continue
         host = source if topology.nodes[source].get("type") == "host" else target
         capacities[host] = float(attributes["capacity"])

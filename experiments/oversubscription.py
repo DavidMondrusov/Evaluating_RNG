@@ -9,6 +9,7 @@ SWITCH_LINK_TYPES = {
     "leaf": ("host_leaf", "leaf_spine"),
     "tor": ("host_tor", "tor_middle_block"),
     "middle_block": ("tor_middle_block", "dcni"),
+    "rng": ("host_link", "fabric"),
 }
 
 

@@ -1,7 +1,10 @@
+import importlib.util
+import ipaddress
 import sys
 from pathlib import Path
 
 
+PROTOCOL_ROOT = Path(__file__).resolve().parent.parent / "spraypoint-protocol"
 DEFAULT_PARAMETERS = {
     "p": 2,
     "h": 1,
@@ -15,18 +18,82 @@ def controller_class():
 
 
 def load_protocol():
-    protocol_root = Path(__file__).resolve().parent.parent / "spraypoint-protocol"
-    if not protocol_root.is_dir():
+    if not PROTOCOL_ROOT.is_dir():
         raise FileNotFoundError(
-            f"Spraypoint protocol directory not found: {protocol_root}"
+            f"Spraypoint protocol directory not found: {PROTOCOL_ROOT}"
         )
-    protocol_path = str(protocol_root)
+    protocol_path = str(PROTOCOL_ROOT)
     if protocol_path not in sys.path:
         sys.path.insert(0, protocol_path)
 
     from spraypoint import SpraypointDeployer, SpraypointParams
 
     return SpraypointDeployer, SpraypointParams
+
+
+def fabric_from_topology(topology):
+    """Offline Spraypoint FabricGraph for an FNSS topology, without Mininet.
+
+    Mirrors what ``fnss.to_mininet(topology, relabel_nodes=True)`` plus
+    ``Mininet(...)`` would create: sorted switches become s1.., sorted hosts
+    become h1.. with Mininet's default IPs (10.0.0.1, ...), and each switch
+    numbers its ports from 1 in ``topology.edges()`` order. Useful for dry
+    runs and tests; a live deployment reads the real ports from ``net``.
+    """
+    load_protocol()
+    from spraypoint import FabricGraph, HostAttachment
+
+    def sorted_nodes(kind):
+        return sorted(
+            node for node, attributes in topology.nodes(data=True)
+            if attributes.get("type") == kind
+        )
+
+    switch_names = {
+        node: f"s{index}"
+        for index, node in enumerate(sorted_nodes("switch"), start=1)
+    }
+    host_names = {
+        node: f"h{index}"
+        for index, node in enumerate(sorted_nodes("host"), start=1)
+    }
+    base_ip = ipaddress.ip_address("10.0.0.0")
+
+    fabric = FabricGraph()
+    for name in switch_names.values():
+        fabric.add_switch(name)
+    next_port = dict.fromkeys(switch_names.values(), 1)
+    for u, v in topology.edges():
+        if u in switch_names and v in switch_names:
+            su, sv = switch_names[u], switch_names[v]
+            fabric.add_fabric_link(su, next_port[su], sv, next_port[sv])
+            next_port[su] += 1
+            next_port[sv] += 1
+            continue
+        switch, host = (u, v) if u in switch_names else (v, u)
+        if switch not in switch_names or host not in host_names:
+            continue
+        sw, name = switch_names[switch], host_names[host]
+        index = int(name[1:])
+        fabric.add_host(HostAttachment(
+            name=name, ip=str(base_ip + index), mac=None,
+            switch=sw, port=next_port[sw],
+        ))
+        next_port[sw] += 1
+    return fabric
+
+
+def load_simulator():
+    """Flow-table packet simulator from the protocol's offline tests.
+
+    Follows every spray/ECMP branch of compiled rules; used for dry runs.
+    """
+    load_protocol()
+    path = PROTOCOL_ROOT / "tests" / "test_spraypoint.py"
+    spec = importlib.util.spec_from_file_location("spraypoint_simulator", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.Simulator
 
 
 def configure(net, parameters):

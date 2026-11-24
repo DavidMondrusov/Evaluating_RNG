@@ -23,7 +23,7 @@ from routing import (
     default_parameters as default_routing_parameters,
     get_controller_class,
 )
-from topologies import azure_clos, clos, jupiter, rail_optimized
+from topologies import azure_clos, clos, jupiter, rail_optimized, rng
 from traffic import clique, hub, matching, uniform_random
 
 
@@ -40,6 +40,12 @@ TOPOLOGIES = {
         },
         "validator": clos.validate_parameters,
         "prompts": ("k",),
+    },
+    "RNG random graph": {
+        "builder": rng.build_topology,
+        "parameters": dict(rng.DEFAULT_PARAMETERS),
+        "validator": lambda parameters: rng.validate_parameters(**parameters),
+        "prompts": ("n", "d", "hosts_per_switch"),
     },
     "Rail-optimized": {
         "builder": rail_optimized.build_topology,
