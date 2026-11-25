@@ -9,8 +9,12 @@ defaults dominated a 92 minute run:
   chains all switches into a few transactions, and fails loudly if one fails.
 * ``Mininet.stop`` deletes every link with its own ``ip link del`` while all
   bridges still exist, so each deletion also costs OVS work over all ports
-  (~200 ms per link, 58 min). ``stop_network`` deletes the bridges first, then
-  every root-namespace link in one kernel operation (interface group delete).
+  (~200 ms per link, 58 min), and a running ovs-vswitchd removes ports one at
+  a time at a cost that grows with the ports present (19.8 min just for the
+  bridges). ``stop_network`` stops ovs-vswitchd, drops the kernel datapath in
+  one call, removes the bridges from the database, deletes every
+  root-namespace link in one kernel operation (interface group delete) and
+  restarts ovs-vswitchd.
 * ``Mininet.staticArp`` runs one ``arp -s`` per host pair (N^2 commands, 3.6 min
   at 512 hosts). ``static_arp`` runs one ``ip -batch`` per host.
 """
@@ -18,8 +22,10 @@ defaults dominated a 92 minute run:
 import os
 import subprocess
 import tempfile
+import time
 
 from mininet.node import OVSSwitch
+from mininet.util import errRun
 
 
 # Keeps one ovs-vsctl argument list far below ARG_MAX (~30 bytes per bridge).
@@ -27,6 +33,7 @@ BRIDGES_PER_TRANSACTION = 1000
 # Interface group used to delete all links at once; unused by anything else
 # on a normal host (everything defaults to group 0), checked before use.
 TEARDOWN_GROUP = 28014
+VSWITCHD_SERVICE = "ovs-vswitchd.service"
 
 
 def _run_checked(args, what, **kwargs):
@@ -64,6 +71,24 @@ class BatchedOVSSwitch(OVSSwitch):
     @classmethod
     def batchStartup(cls, switches, run=_batch_startup_run):
         return super().batchStartup(switches, run=run)
+
+    @classmethod
+    def batchShutdown(cls, switches, run=errRun):
+        """Skip ovs-vsctl for bridges ``delete_bridges`` already removed.
+
+        Mininet's version runs ``ovs-vsctl del-br``, which waits for
+        ovs-vswitchd to acknowledge it; that would hang if the daemon were
+        not running after an offline teardown.
+        """
+        remaining = tuple(
+            s for s in switches if not getattr(s, "bridge_deleted", False)
+        )
+        if remaining:
+            super().batchShutdown(remaining, run=run)
+        for switch in switches:
+            if getattr(switch, "bridge_deleted", False):
+                switch.terminate()
+        return switches
 
 
 def _write_batch_file(lines):
@@ -106,14 +131,82 @@ def static_arp(net):
             raise RuntimeError(f"{src.name}: static ARP failed: {body.strip()}")
 
 
-def delete_bridges(switches, run=_run_checked):
-    """Delete OVS bridges in as few ovs-vsctl transactions as possible."""
-    names = [switch.name for switch in switches]
-    for start in range(0, len(names), BRIDGES_PER_TRANSACTION):
-        args = ["ovs-vsctl"]
-        for name in names[start:start + BRIDGES_PER_TRANSACTION]:
-            args += ["--", "--if-exists", "del-br", name]
+def delete_bridges(switches, run=_run_checked, no_wait=False):
+    """Delete OVS bridges in as few ovs-vsctl transactions as possible.
+
+    no_wait: only update the database (``--no-wait``), for when ovs-vswitchd
+    is stopped and so cannot acknowledge the change.
+    """
+    switches = list(switches)
+    for start in range(0, len(switches), BRIDGES_PER_TRANSACTION):
+        chunk = switches[start:start + BRIDGES_PER_TRANSACTION]
+        args = ["ovs-vsctl"] + (["--no-wait"] if no_wait else [])
+        for switch in chunk:
+            args += ["--", "--if-exists", "del-br", switch.name]
         run(args, "ovs-vsctl del-br")
+        for switch in chunk:
+            switch.bridge_deleted = True
+
+
+def offline_teardown_blocker(net, run=_run_checked):
+    """Why the OVS-offline teardown cannot be used here, or None if it can.
+
+    It deletes the whole kernel datapath, so it is only safe when every OVS
+    bridge on the host belongs to this network.
+    """
+    ours = {switch.name for switch in net.switches}
+    foreign = sorted(set(run(["ovs-vsctl", "list-br"], "ovs-vsctl list-br")
+                         .split()) - ours)
+    if foreign:
+        return f"OVS has bridges outside this network: {' '.join(foreign)}"
+    return None
+
+
+def offline_teardown(net, run=_run_checked):
+    """Remove all bridges, ports and links with ovs-vswitchd stopped.
+
+    A running ovs-vswitchd removes ports one at a time, each costing time
+    proportional to the ports still present: deleting the bridges of the
+    256x64 fabric (33.6k ports) took 19.8 min. With the daemon stopped,
+    ``ovs-dpctl del-dp`` drops the kernel datapath and all its ports at once,
+    the bridges are removed from the database only (``--no-wait``), and the
+    links are deleted as one interface group. ovs-vswitchd then starts with
+    an empty configuration. It is restarted even if a step fails.
+
+    Only ovs-vswitchd is stopped (``--job-mode=ignore-dependencies``): a plain
+    ``systemctl stop`` also stops openvswitch-switch.service, which requires
+    it, and with it ovsdb-server, which is PartOf that unit. The database is
+    changed before the datapath is touched, so if it is unreachable nothing
+    has been destroyed and the restarted daemon still has every bridge.
+
+    Returns the time of each step in seconds and any link deletion errors.
+    """
+    steps = {}
+
+    def timed(name, function, *args, **kwargs):
+        start = time.monotonic()
+        try:
+            return function(*args, **kwargs)
+        finally:
+            steps[name] = round(time.monotonic() - start, 2)
+
+    switches = [s for s in net.switches if isinstance(s, OVSSwitch)]
+    timed("stop_vswitchd_s", run,
+          ["systemctl", "stop", "--job-mode=ignore-dependencies",
+           VSWITCHD_SERVICE],
+          "stopping ovs-vswitchd")
+    try:
+        timed("delete_bridges_s", delete_bridges, switches, run=run,
+              no_wait=True)
+        datapaths = run(["ovs-dpctl", "dump-dps"], "ovs-dpctl dump-dps").split()
+        for datapath in datapaths:
+            timed("del_dp_s", run, ["ovs-dpctl", "del-dp", datapath],
+                  "ovs-dpctl del-dp")
+        _, steps["link_errors"] = timed("delete_links_s", delete_links, net)
+    finally:
+        timed("start_vswitchd_s", run,
+              ["systemctl", "start", VSWITCHD_SERVICE], "starting ovs-vswitchd")
+    return steps
 
 
 def root_namespace_end(link):
@@ -191,16 +284,40 @@ def delete_links(net):
     return len(deleted), errors
 
 
-def stop_network(net):
-    """``net.stop()`` with bridges deleted first and links deleted in bulk.
+def stop_network(net, offline=True):
+    """``net.stop()`` with bridges and links deleted in bulk first.
+
+    offline: use ``offline_teardown`` (ovs-vswitchd stopped meanwhile) when
+    it is safe; otherwise delete the bridges through the running daemon,
+    then the links as one group.
 
     ``net.stop()`` always runs, so anything the bulk steps did not remove is
-    still cleaned up the usual (slow) way.
+    still cleaned up the usual (slow) way. Returns the step timings.
     """
+    steps = {}
     try:
-        delete_bridges(s for s in net.switches if isinstance(s, OVSSwitch))
-        _, errors = delete_links(net)
-        if errors:
-            print(f"*** Some links were already gone during teardown:\n{errors}")
+        blocker = offline_teardown_blocker(net) if offline else "disabled"
+        if blocker is None:
+            try:
+                steps.update(offline_teardown(net))
+            except Exception as error:  # vswitchd was restarted; go online
+                blocker = f"offline teardown failed: {error}"
+                steps["offline_error"] = str(error)[:500]
+        steps["offline"] = blocker is None
+        if blocker is not None:
+            if offline:
+                print(f"*** Not stopping OVS for teardown: {blocker}")
+            start = time.monotonic()
+            delete_bridges(s for s in net.switches if isinstance(s, OVSSwitch))
+            steps["delete_bridges_s"] = round(time.monotonic() - start, 2)
+            start = time.monotonic()
+            _, steps["link_errors"] = delete_links(net)
+            steps["delete_links_s"] = round(time.monotonic() - start, 2)
+        if steps.get("link_errors"):
+            print("*** Some links were already gone during teardown:\n"
+                  f"{steps['link_errors']}")
     finally:
+        start = time.monotonic()
         net.stop()
+        steps["net_stop_rest_s"] = round(time.monotonic() - start, 2)
+    return steps

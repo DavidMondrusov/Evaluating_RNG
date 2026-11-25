@@ -170,6 +170,171 @@ class TeardownTests(unittest.TestCase):
         )
 
 
+class FakeSwitch:
+    def __init__(self, name):
+        self.name = name
+        self.terminated = False
+
+    def terminate(self):
+        self.terminated = True
+
+
+class FakeOvs:
+    """Records commands; ``fail`` makes the command with that word fail."""
+
+    def __init__(self, bridges=(), datapaths=("system@ovs-system",), fail=None):
+        self.calls = []
+        self.bridges = list(bridges)
+        self.datapaths = list(datapaths)
+        self.fail = fail
+
+    def __call__(self, args, what):
+        self.calls.append(args)
+        if self.fail and self.fail in args:
+            raise RuntimeError(f"{what} failed")
+        if args[:2] == ["ovs-vsctl", "list-br"]:
+            return "\n".join(self.bridges) + "\n"
+        if args[:2] == ["ovs-dpctl", "dump-dps"]:
+            return "\n".join(self.datapaths) + "\n"
+        return ""
+
+
+class OfflineTeardownTests(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.object(
+            mininet_batch, "delete_links", lambda net: (len(net.links), "")
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.switches = [FakeSwitch("s1"), FakeSwitch("s2")]
+        self.net = mock.Mock(switches=self.switches, links=[])
+
+    def test_steps_run_with_vswitchd_stopped(self):
+        ovs = FakeOvs()
+        with mock.patch.object(mininet_batch, "OVSSwitch", FakeSwitch):
+            steps = mininet_batch.offline_teardown(self.net, run=ovs)
+        self.assertEqual(
+            [call[:3] for call in ovs.calls],
+            [
+                ["systemctl", "stop", "--job-mode=ignore-dependencies"],
+                ["ovs-vsctl", "--no-wait", "--"],
+                ["ovs-dpctl", "dump-dps"],
+                ["ovs-dpctl", "del-dp", "system@ovs-system"],
+                ["systemctl", "start", "ovs-vswitchd.service"],
+            ],
+        )
+        self.assertEqual(ovs.calls[0][3], "ovs-vswitchd.service")
+        self.assertEqual(
+            ovs.calls[1],
+            ["ovs-vsctl", "--no-wait",
+             "--", "--if-exists", "del-br", "s1",
+             "--", "--if-exists", "del-br", "s2"],
+        )
+        self.assertTrue(all(s.bridge_deleted for s in self.switches))
+        self.assertIn("delete_links_s", steps)
+
+    def test_unreachable_database_leaves_datapath_alone(self):
+        ovs = FakeOvs(fail="--no-wait")
+        with mock.patch.object(mininet_batch, "OVSSwitch", FakeSwitch), \
+                self.assertRaises(RuntimeError):
+            mininet_batch.offline_teardown(self.net, run=ovs)
+        self.assertFalse(any("ovs-dpctl" in call for call in ovs.calls))
+        self.assertEqual(
+            ovs.calls[-1], ["systemctl", "start", "ovs-vswitchd.service"]
+        )
+
+    def test_vswitchd_restarted_when_a_step_fails(self):
+        ovs = FakeOvs(fail="del-dp")
+        with mock.patch.object(mininet_batch, "OVSSwitch", FakeSwitch), \
+                self.assertRaises(RuntimeError):
+            mininet_batch.offline_teardown(self.net, run=ovs)
+        self.assertEqual(
+            ovs.calls[-1], ["systemctl", "start", "ovs-vswitchd.service"]
+        )
+
+    def test_foreign_bridges_block_offline_teardown(self):
+        net = mock.Mock(switches=self.switches)
+        self.assertIsNone(mininet_batch.offline_teardown_blocker(
+            net, run=FakeOvs(bridges=["s1", "s2"])))
+        self.assertIn("br-ex", mininet_batch.offline_teardown_blocker(
+            net, run=FakeOvs(bridges=["s1", "br-ex"])))
+
+
+class StopNetworkTests(unittest.TestCase):
+    def _stop(self, blocker):
+        calls = []
+        net = mock.Mock(switches=[], stop=lambda: calls.append("net.stop"))
+        with mock.patch.object(
+            mininet_batch, "offline_teardown_blocker", lambda net: blocker
+        ), mock.patch.object(
+            mininet_batch, "offline_teardown",
+            lambda net: calls.append("offline") or {},
+        ), mock.patch.object(
+            mininet_batch, "delete_bridges",
+            lambda switches: calls.append("online bridges"),
+        ), mock.patch.object(
+            mininet_batch, "delete_links",
+            lambda net: calls.append("links") or (0, ""),
+        ):
+            steps = mininet_batch.stop_network(net)
+        return calls, steps
+
+    def test_uses_offline_teardown_when_safe(self):
+        calls, steps = self._stop(None)
+        self.assertEqual(calls, ["offline", "net.stop"])
+        self.assertTrue(steps["offline"])
+
+    def test_falls_back_when_blocked(self):
+        calls, steps = self._stop("OVS has bridges outside this network: x")
+        self.assertEqual(calls, ["online bridges", "links", "net.stop"])
+        self.assertFalse(steps["offline"])
+
+    def test_failed_offline_teardown_falls_back_to_online(self):
+        calls = []
+        net = mock.Mock(switches=[], stop=lambda: calls.append("net.stop"))
+        with mock.patch.object(
+            mininet_batch, "offline_teardown_blocker", lambda net: None
+        ), mock.patch.object(
+            mininet_batch, "offline_teardown",
+            side_effect=RuntimeError("db gone"),
+        ), mock.patch.object(
+            mininet_batch, "delete_bridges",
+            lambda switches: calls.append("online bridges"),
+        ), mock.patch.object(
+            mininet_batch, "delete_links",
+            lambda net: calls.append("links") or (0, ""),
+        ):
+            steps = mininet_batch.stop_network(net)
+        self.assertEqual(calls, ["online bridges", "links", "net.stop"])
+        self.assertFalse(steps["offline"])
+        self.assertIn("db gone", steps["offline_error"])
+
+    def test_net_stop_runs_even_if_bulk_step_fails(self):
+        calls = []
+        net = mock.Mock(switches=[], stop=lambda: calls.append("net.stop"))
+        with mock.patch.object(
+            mininet_batch, "offline_teardown_blocker", lambda net: "x"
+        ), mock.patch.object(
+            mininet_batch, "delete_bridges", side_effect=RuntimeError("x")
+        ), self.assertRaises(RuntimeError):
+            mininet_batch.stop_network(net)
+        self.assertEqual(calls, ["net.stop"])
+
+
+class BatchShutdownTests(unittest.TestCase):
+    def test_deleted_bridges_skip_ovs_vsctl(self):
+        done, pending = FakeSwitch("s1"), FakeSwitch("s2")
+        done.bridge_deleted = True
+        passed = []
+        with mock.patch.object(
+            mininet_batch.OVSSwitch, "batchShutdown",
+            classmethod(lambda cls, switches, run=None: passed.append(switches)),
+        ):
+            mininet_batch.BatchedOVSSwitch.batchShutdown((done, pending))
+        self.assertEqual(passed, [(pending,)])
+        self.assertTrue(done.terminated)
+
+
 class StaticArpTests(unittest.TestCase):
     def test_one_batch_per_single_homed_host(self):
         switch = FakeNode("s1", False)
