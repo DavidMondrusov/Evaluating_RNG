@@ -12,7 +12,6 @@ from collections.abc import Mapping
 import fnss
 import networkx
 import mininet
-from mininet.link import TCLink
 from mininet.net import Mininet
 
 from experiments import iperf, load_sweep, oversubscription
@@ -23,6 +22,7 @@ from routing import (
     default_parameters as default_routing_parameters,
     get_controller_class,
 )
+from tc_batch import BatchedTCLink, batched_tc, flush_tc
 from topologies import azure_clos, clos, jupiter, rail_optimized, rng
 from traffic import clique, hub, matching, uniform_random
 
@@ -689,14 +689,19 @@ def run_experiment(config, config_source=None):
             }
             net = Mininet(
                 topo=mininet_topology,
-                link=TCLink,
+                link=BatchedTCLink,
                 controller=get_controller_class(config["routing"]["name"]),
                 build=False,
             )
             network_needs_cleanup = True
             network_stopped = False
-            net.build()
-            net.start()
+            # tc rescans every interface on each call; batch it so deploy
+            # time stays linear in the number of links (see tc_batch.py).
+            with batched_tc():
+                net.build()
+                flush_tc()
+                net.start()
+                flush_tc()
             summary["routing_setup"] = configure_routing(
                 config["routing"]["name"],
                 net,
