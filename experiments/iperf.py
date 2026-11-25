@@ -4,6 +4,8 @@ import re
 import signal
 import subprocess
 import time
+from collections.abc import Mapping
+from contextlib import nullcontext
 from pathlib import Path
 
 
@@ -356,7 +358,8 @@ def measure_idle(net, flows, host_names):
 
 
 def run_flows_concurrently(
-    net, flows, host_names, duration_seconds, log_file, idle_latency=None
+    net, flows, host_names, duration_seconds, log_file, idle_latency=None,
+    status=None,
 ):
     """Run every flow at once, one port per flow, and return per-flow results."""
     if idle_latency is None:
@@ -369,6 +372,8 @@ def run_flows_concurrently(
         )
         for flow_id, (_, destination, _) in flows.items()
     }
+    if status:
+        status.note(f"servers started ({len(servers)})")
     clients, pings, outputs = {}, {}, {}
     client_read_errors = {}
     ping_read_errors = {}
@@ -405,6 +410,8 @@ def run_flows_concurrently(
                 _ping_command(destination_ip, duration_seconds),
                 **PROCESS_KWARGS,
             )
+        if status:
+            status.note(f"clients started ({len(clients)})")
         for flow_id in flows:
             try:
                 client_output = _read_output(
@@ -427,6 +434,8 @@ def run_flows_concurrently(
                     "seconds"
                 )
             outputs[flow_id] = (client_output, ping_output)
+        if status:
+            status.note(f"flows collected ({len(outputs)})")
     finally:
         for process in (*clients.values(), *pings.values()):
             if process.poll() is None:
@@ -568,17 +577,26 @@ def run(
     duration_seconds,
     output_dir,
     concurrent=False,
+    status=None,
 ):
     """Measure UDP throughput and concurrent ICMP latency for each flow."""
     output_dir = Path(output_dir)
+    phase = status.phase if status else (lambda *args, **kwargs: nullcontext())
     log_path = output_dir / "iperf.log"
     csv_path = output_dir / "iperf.csv"
-    flows = {
-        flow_id: (source, destination, float(demand_mbps))
-        for flow_id, ((source, destination), demand_mbps) in enumerate(
-            traffic_matrix.flows().items(), start=1
-        )
-    }
+    if isinstance(traffic_matrix, Mapping):
+        flows = {
+            int(flow_id): (source, destination, float(demand_mbps))
+            for flow_id, (source, destination, demand_mbps) in
+            traffic_matrix.items()
+        }
+    else:
+        flows = {
+            flow_id: (source, destination, float(demand_mbps))
+            for flow_id, ((source, destination), demand_mbps) in enumerate(
+                traffic_matrix.flows().items(), start=1
+            )
+        }
     for source, destination, _ in flows.values():
         if source not in host_names or destination not in host_names:
             raise ValueError(
@@ -597,9 +615,16 @@ def run(
                     f"*** iperf3: {len(flows)} concurrent UDP flows "
                     f"({duration_seconds}s)"
                 )
-                measured = run_flows_concurrently(
-                    net, flows, host_names, duration_seconds, log_file
-                )
+                with phase("concurrent flows", flows=len(flows)):
+                    run_kwargs = {"status": status} if status else {}
+                    measured = run_flows_concurrently(
+                        net,
+                        flows,
+                        host_names,
+                        duration_seconds,
+                        log_file,
+                        **run_kwargs,
+                    )
             for flow_id, (source, destination, demand_mbps) in flows.items():
                 results.append(
                     _result(
@@ -623,19 +648,25 @@ def run(
                 source_host = host_names[source]
                 destination_host = host_names[destination]
                 with log_path.open("a", encoding="utf-8") as log_file:
-                    print(
-                        f"*** iperf3: testing UDP bandwidth between "
-                        f"{source_host} and {destination_host} "
-                        f"({duration_seconds}s, {demand_mbps:g} Mbps)"
-                    )
-                    measured = _run_flow(
-                        net.get(source_host),
-                        net.get(destination_host),
-                        demand_mbps,
-                        duration_seconds,
-                        log_file,
-                        flow_id,
-                    )
+                    with phase(
+                        "flow",
+                        id=flow_id,
+                        source=source_host,
+                        destination=destination_host,
+                    ):
+                        print(
+                            f"*** iperf3: testing UDP bandwidth between "
+                            f"{source_host} and {destination_host} "
+                            f"({duration_seconds}s, {demand_mbps:g} Mbps)"
+                        )
+                        measured = _run_flow(
+                            net.get(source_host),
+                            net.get(destination_host),
+                            demand_mbps,
+                            duration_seconds,
+                            log_file,
+                            flow_id,
+                        )
                 results.append(
                     _result(
                         flow_id,

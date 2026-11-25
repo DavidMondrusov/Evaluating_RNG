@@ -19,7 +19,10 @@ sudo /home/rng/mininet-env/bin/python /home/rng/Evaluating_RNG/run_experiment.py
 ```
 
 The prompts accept defaults by pressing Enter. Results are saved in a
-timestamped directory under `test-results/`. Each run includes `results.json`
+timestamped directory under `test-results/`. A `--config` invocation puts every
+run from that config in one combined folder,
+`test-results/batch-<timestamp>-<config>/<NN>-<run name>/`. Each run includes
+`results.json`
 (configuration, topology, software, and measurements) and
 `traffic-matrix.xml`, plus files produced by its selected experiment
 (`iperf.csv` and `iperf.log` for performance tests, or
@@ -50,7 +53,7 @@ protocol's documented OVS/OpenFlow support and `arp` utility.
 The runner supports `Clos fat-tree`, `Azure Clos`, `Rail-optimized`, and
 `Jupiter direct-connect` topologies; `Uniform random host pairs`, `Matching
 host pairs`, `Hub`, and `Clique` traffic; and `UDP iperf throughput`, `Load
-sweep`, and `Topology oversubscription ratio` experiments. Omitted fields use
+sweep`, and `Static topology analysis` experiments. Omitted fields use
 the same defaults as the interactive menus (4-ary topology, 8 flows at
 1 Mbps, seed 1, and 5-second iperf duration). Every run gets its own results
 directory; if a run fails, the runner records the error and continues with
@@ -58,14 +61,31 @@ later runs, then exits with a non-zero status. See
 [expected-test-results.md](./expected-test-results.md) for the smoke test's
 expected output and pass criteria.
 
+Each run also writes `status.log`: timestamped `start`/`done`/`fail` lines with
+elapsed seconds for topology build, traffic planning, Mininet build/start,
+routing, each experiment, and Mininet stop. The load sweep adds `sweep matrix`,
+`idle ping`, `iperf`, and `summary` phases per active fraction, and UDP iperf
+adds one phase per flow. Grep `done` and sort by the trailing seconds to find
+the slow phase in a large run. HTB quantum warnings from `tc` are suppressed by
+sizing the queue quantum near 100 KB.
+
 `Azure Clos` is a scaled two-tier leaf-spine model of Azure's fabric:
 uniform link capacity, 1:1 leaf oversubscription by default (set
 `leaf_oversubscription` for 4:1 and similar), one ECMP path per spine, deep
-buffers, and DC-scale 50 us link delay.
+buffers, and DC-scale 50 us link delay. For ToR traffic it defaults to
+`host_mode: "stub"`: one stub host per leaf whose link carries the whole leaf
+rate.
+
 The interactive prompt accepts `leaf_oversubscription`; for example, enter
 `3` to make aggregate host-link capacity per leaf three times its aggregate
 leaf-to-spine capacity. This is a local leaf ratio, not the paper's network-wide
 worst-case oversubscription ratio.
+
+`traffic.scope` comes from the traffic model: `Uniform random host pairs` uses
+`host`; `Matching`, `Hub` and `Clique` use `tor`, applying the pattern to the
+leaf graph and expanding each leaf flow into host flows at the leaf's full
+rate. Azure Clos then defaults to stub hosts for those patterns. Both settings
+can be overridden in a config file.
 
 UDP iperf tests each selected traffic flow in turn. The runner records an idle
 ICMP ping baseline, then runs another ping probe concurrently with each flow
@@ -104,19 +124,32 @@ final receiver summary.
 This is an empirical estimate using iperf and the selected routing, not the
 paper's exact multicommodity-flow LP.
 
-### Comparing performance and oversubscription
+### Static topology analysis
 
-The [performance config](./experiment-config.performance.json) runs the same
-four UDP flows at 8 Mbps over 1:1 and 4:1 Clos capacity profiles. It records
-throughput, idle latency, and latency under load. The [oversubscription config](./experiment-config.oversubscription.json)
-calculates the ratio for each edge and aggregation switch in both profiles;
-this analysis does not start Mininet and does not require root privileges.
+`Static topology analysis` needs no Mininet, no root, and no traffic pattern:
+it reads only the topology, so it is safe to run before any long build. It
+writes `oversubscription.csv` (per-switch downstream/upstream capacity and
+ratio) and `tor-pairs.csv` (per ToR pair), and reports in `results.json`:
 
-For these Clos profiles, the ratio at each switch is the sum of downstream
-link capacities divided by the sum of upstream link capacities. The 1:1
-profile uses 10 Mbps at every layer. The 4:1 profile uses 10 Mbps host links,
-2.5 Mbps edge uplinks, and 0.625 Mbps aggregation uplinks. Run either config
-with the same `--config` command shown above, substituting its filename.
+* `maximum_oversubscription_ratio` plus the switch that has it. For a Clos the
+  ratio at each switch is downstream link capacity divided by upstream link
+  capacity (1:1 uses 10 Mbps at every layer; 4:1 uses 10 Mbps host links,
+  2.5 Mbps edge uplinks, and 0.625 Mbps aggregation uplinks).
+* per ToR pair: the number of edge-disjoint paths (Menger), the shortest-path
+  hop count, the aggregate pair capacity (max flow over the real link
+  capacities), and the weakest and strongest single-path bottleneck.
+* `aggregate_oversubscription_ratio` = offered ToR rate / aggregate pair
+  capacity, and `single_path_oversubscription_ratio` = offered ToR rate /
+  single-path bottleneck. The second is the ceiling single-path hashing (ECMP)
+  leaves a flow with; the first is what spraying across disjoint paths can
+  reach. A 128x32 Azure Clos with 0.625 Mbps spine links has 32 disjoint paths,
+  aggregate ratio 1.0, and single-path ratio 32.0.
+* `topology_summary`: node and link counts by type/layer, host and fabric
+  capacity, link capacity distribution, hosts per ToR, connectivity.
+
+Pair analysis costs one max-flow solve per pair (~40 ms at 128 ToRs), so at
+most `pair_sample` pairs are analyzed (default 32; the sample is deterministic
+for `pair_seed`). Every pair is analyzed when the fabric has fewer than that.
 
 To try Spraypoint on the same measurement path, run
 [experiment-config.spraypoint.json](./experiment-config.spraypoint.json) with

@@ -1,0 +1,148 @@
+{
+  "runs": [
+    {
+      "name": "rng-12tor-3to1-ecmp",
+      "topology": {
+        "name": "RNG random graph",
+        "parameters": {
+          "n": 12,
+          "d": 3,
+          "hosts_per_switch": 3,
+          "host_link_mbps": 10,
+          "fabric_link_mbps": 3.3333333333333335,
+          "seed": 1
+        }
+      },
+      "routing": {"name": "ECMP shortest path"},
+      "traffic": {"name": "Matching host pairs", "demand_mbps": 1.0, "seed": 1},
+      "experiments": [
+        {
+          "name": "Load sweep",
+          "duration_seconds": 5,
+          "active_fractions": [0.5, 1.0],
+          "matrix_repetitions": 5
+        }
+      ]
+    },
+    {
+      "name": "azure-12tor-3to1-ecmp",
+      "topology": {
+        "name": "Azure Clos",
+        "parameters": {
+          "leaves": 12,
+          "spines": 4,
+          "hosts_per_leaf": 3,
+          "host_link_mbps": 10,
+          "leaf_oversubscription": 3.0,
+          "delay_ms": 1,
+          "buffer_packets": 50,
+          "host_mode": "server"
+        }
+      },
+      "routing": {"name": "ECMP shortest path"},
+      "traffic": {"name": "Matching host pairs", "demand_mbps": 1.0, "seed": 1},
+      "experiments": [
+        {
+          "name": "Load sweep",
+          "duration_seconds": 5,
+          "active_fractions": [0.5, 1.0],
+          "matrix_repetitions": 5
+        }
+      ]
+    },
+    {
+      "name": "jupiter-12tor-3to1-ecmp",
+      "topology": {
+        "name": "Jupiter direct-connect",
+        "parameters": {
+          "blocks": 4,
+          "middle_blocks": 1,
+          "tors_per_block": 3,
+          "hosts_per_tor": 3
+        }
+      },
+      "routing": {"name": "ECMP shortest path"},
+      "traffic": {"name": "Matching host pairs", "demand_mbps": 1.0, "seed": 1},
+      "experiments": [
+        {
+          "name": "Load sweep",
+          "duration_seconds": 5,
+          "active_fractions": [0.5, 1.0],
+          "matrix_repetitions": 5
+        }
+      ]
+    },
+    {
+      "name": "rng-12tor-3to1-spraypoint",
+      "topology": {
+        "name": "RNG random graph",
+        "parameters": {
+          "n": 12,
+          "d": 3,
+          "hosts_per_switch": 3,
+          "host_link_mbps": 10,
+          "fabric_link_mbps": 3.3333333333333335,
+          "seed": 1
+        }
+      },
+      "routing": {"name": "Spraypoint", "parameters": {"p": 2, "h": 1}},
+      "traffic": {"name": "Matching host pairs", "demand_mbps": 1.0, "seed": 1},
+      "experiments": [
+        {
+          "name": "Load sweep",
+          "duration_seconds": 5,
+          "active_fractions": [0.5, 1.0],
+          "matrix_repetitions": 5
+        }
+      ]
+    },
+    {
+      "name": "azure-12tor-3to1-spraypoint",
+      "topology": {
+        "name": "Azure Clos",
+        "parameters": {
+          "leaves": 12,
+          "spines": 4,
+          "hosts_per_leaf": 3,
+          "host_link_mbps": 10,
+          "leaf_oversubscription": 3.0,
+          "delay_ms": 1,
+          "buffer_packets": 50,
+          "host_mode": "server"
+        }
+      },
+      "routing": {"name": "Spraypoint", "parameters": {"p": 2, "h": 1}},
+      "traffic": {"name": "Matching host pairs", "demand_mbps": 1.0, "seed": 1},
+      "experiments": [
+        {
+          "name": "Load sweep",
+          "duration_seconds": 5,
+          "active_fractions": [0.5, 1.0],
+          "matrix_repetitions": 5
+        }
+      ]
+    },
+    {
+      "name": "jupiter-12tor-3to1-spraypoint",
+      "topology": {
+        "name": "Jupiter direct-connect",
+        "parameters": {
+          "blocks": 4,
+          "middle_blocks": 1,
+          "tors_per_block": 3,
+          "hosts_per_tor": 3
+        }
+      },
+      "routing": {"name": "Spraypoint", "parameters": {"p": 2, "h": 1}},
+      "traffic": {"name": "Matching host pairs", "demand_mbps": 1.0, "seed": 1},
+      "experiments": [
+        {
+          "name": "Load sweep",
+          "duration_seconds": 5,
+          "active_fractions": [0.5, 1.0],
+          "matrix_repetitions": 5
+        }
+      ]
+    }
+  ]
+}
