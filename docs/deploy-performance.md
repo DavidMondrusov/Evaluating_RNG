@@ -337,6 +337,70 @@ Notes on this run:
   freeing about 34k devices at once (tasks waiting on the kernel count toward
   load). It was brief and did not affect DNS.
 
+A user-started repeat of the same full run took 26.9 min (deploy 23.5 min),
+so the result reproduces.
+
+## Does the faster deploy build the same network?
+
+The changes are meant to build exactly the same network, only faster. To
+check this, the same small experiment ran on both versions of the code:
+
+- **Before:** commit `0f61b40`, the last commit before any of these changes.
+- **After:** this branch.
+
+Both ran with mitigations on, so host conditions were the same. The config
+was Azure Clos with 8 leaves, 2 spines and 2 hosts per leaf (16 hosts), with
+ECMP, in four runs:
+
+- **hub-a, hub-b:** hub traffic with UDP iperf and a load sweep. 15 flows of
+  1 Mbps converge on one 10 Mbps host link, so the tc shaping matters.
+- **uniform-a, uniform-b:** 8 random host pairs with UDP iperf, the
+  uncongested case.
+
+Each scenario ran twice to measure normal run-to-run noise. All 8 runs
+completed. None hit the idle-ping error at this size.
+
+**Identical in both versions:** topology, traffic matrix, ECMP setup
+(10 switches, 160 flows, 8 groups) and the iperf flow pairs.
+
+**UDP iperf:**
+
+| Run | Throughput per flow (before → after) | Min RTT (before → after) | Loss / failed flows |
+|---|---|---|---|
+| hub-a | 0.9914 → 0.9914 Mbps | 0.48 → 0.48 ms | 0 / 0 in both |
+| hub-b | 0.9914 → 0.9914 Mbps | 0.48 → 0.48 ms | 0 / 0 in both |
+| uniform-a | 0.9914 → 0.9914 Mbps | 0.50 → 0.50 ms | 0 / 0 in both |
+| uniform-b | 0.9914 → 0.9914 Mbps | 0.49 → 0.50 ms | 0 / 0 in both |
+
+**Load sweep (hub traffic):** delivered throughput and loss agree within
+noise, so rates and queues behave the same. At 100% active leaves:
+
+| | hub-a (before → after) | hub-b (before → after) |
+|---|---|---|
+| Delivered | 15.7 → 17.9 Mbps | 17.6 → 18.5 Mbps |
+| Loss | 88.8 → 87.2% | 87.4 → 86.8% |
+
+The worst-pair `oversubscription_ratio` varies a lot, but as much *within*
+one version as between versions. With the old code, the same config gave 32
+and 60 at 100%, and 14.0 and 6.8 at 62.5%. The cause is ECMP itself:
+
+- each iperf subflow uses a random source port;
+- the switches hash that port to pick a spine.
+
+At 25%, hub-a and hub-b had exactly the same subflows (local ports 43156 and
+56537). In one run they landed on different spines and delivered 19.3 Mbps.
+In the other they landed on the same spine and delivered 9.7 Mbps.
+
+**Conclusion:** the batched deploy builds an equivalent network, and traffic
+results are unchanged. At this small size the new code is only 3-8 s faster
+per run (for example, 163 s to 159 s), as expected, because the gains come
+from steps whose cost grows with fabric size.
+
+**Note for experiment design:** with ECMP, the worst-pair oversubscription
+ratio depends on a few hash outcomes, so a single matrix per active fraction
+(the default) is not enough to draw conclusions. Use `matrix_repetitions`
+greater than 1, or repeat runs and report the spread.
+
 ## Where the time goes now
 
 Switch start, about 15 minutes, is 56% of the run. It is the same OVS limit
