@@ -9,13 +9,15 @@ import tempfile
 import networkx
 from mininet.node import OVSSwitch
 
+from mininet_batch import static_arp
+
 
 DEFAULT_PARAMETERS = {}
-OFCTL = "ovs-ofctl -O OpenFlow13"
-# Flow tables are loaded as one OpenFlow 1.4 bundle: ovs-vswitchd commits it
-# in a single operation, whereas separate flow mods each cost time that grows
-# with the total number of ports (~13x slower at 2-9k ports).
-OFCTL_BUNDLE = "ovs-ofctl -O OpenFlow14 --bundle"
+# Each switch's whole table (clear, groups, flows) is loaded as one atomic
+# OpenFlow 1.4 bundle: ovs-vswitchd commits it in a single operation, whereas
+# separate flow mods and separate ovs-ofctl calls each cost time that grows
+# with the total number of ports (~1.1 s per switch over 4+ calls at 34k).
+OFCTL_BUNDLE = "ovs-ofctl -O OpenFlow14 bundle"
 PROTOCOLS = "OpenFlow13,OpenFlow14"
 # Keeps one ovs-vsctl argument list far below ARG_MAX (~50 bytes per bridge).
 BRIDGES_PER_TRANSACTION = 1000
@@ -63,6 +65,26 @@ def _configure_bridges(bridges, run=subprocess.run):
             )
 
 
+def bundle_lines(groups, flows):
+    """Lines of an ``ovs-ofctl bundle`` file that replace a switch's tables.
+
+    groups: {tuple of output ports: group id}; flows: flow specs (match and
+    actions). Existing flows and groups are cleared first, then a priority 0
+    drop, the select groups and the flows that reference them are added, all
+    in order, in one transaction.
+    """
+    lines = [
+        "flow delete",
+        "group delete group_id=all",
+        "flow add priority=0,actions=drop",
+    ]
+    for out, group_id in groups.items():
+        buckets = ",".join(f"bucket=actions=output:{p}" for p in out)
+        lines.append(f"group add group_id={group_id},type=select,{buckets}")
+    lines += [f"flow add {flow}" for flow in flows]
+    return lines
+
+
 def configure(net, parameters):
     graph = networkx.Graph()
     ports = {}  # (node, neighbor) -> OpenFlow port on node
@@ -78,11 +100,6 @@ def configure(net, parameters):
     groups = {s.name: {} for s in switches}  # port tuple -> group id
 
     _configure_bridges([switch.name for switch in switches])
-    for switch in switches:
-        bridge = shlex.quote(switch.name)
-        _run(switch, f"{OFCTL} del-flows {bridge}")
-        _run(switch, f"{OFCTL} del-groups {bridge}")
-        _run(switch, f"{OFCTL} add-flow {bridge} priority=0,actions=drop")
 
     for host in net.hosts:
         (edge,) = [n for n in graph.neighbors(host.name) if n in fabric]
@@ -115,25 +132,22 @@ def configure(net, parameters):
             )
 
     for switch in switches:
-        bridge = shlex.quote(switch.name)
-        for out, group_id in groups[switch.name].items():
-            buckets = ",".join(f"bucket=actions=output:{p}" for p in out)
-            _run(
-                switch,
-                f"{OFCTL} add-group {bridge} "
-                f"group_id={group_id},type=select,{buckets}",
-            )
         fd, path = tempfile.mkstemp()
         try:
-            with os.fdopen(fd, "w") as flow_file:
-                flow_file.write("\n".join(flows[switch.name]) + "\n")
+            with os.fdopen(fd, "w") as bundle_file:
+                bundle_file.write(
+                    "\n".join(
+                        bundle_lines(groups[switch.name], flows[switch.name])
+                    ) + "\n"
+                )
             _run(
                 switch,
-                f"{OFCTL_BUNDLE} add-flows {bridge} {shlex.quote(path)}",
+                f"{OFCTL_BUNDLE} {shlex.quote(switch.name)} "
+                f"{shlex.quote(path)}",
             )
         finally:
             os.unlink(path)
-    net.staticArp()
+    static_arp(net)
     return {
         "deployed": True,
         "deployment_mode": "ecmp",

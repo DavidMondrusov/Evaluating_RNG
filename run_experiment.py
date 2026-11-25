@@ -22,6 +22,7 @@ from routing import (
     default_parameters as default_routing_parameters,
     get_controller_class,
 )
+from mininet_batch import BatchedOVSSwitch, stop_network
 from tc_batch import BatchedTCLink, batched_tc, flush_tc
 from topologies import azure_clos, clos, jupiter, rail_optimized, rng
 from traffic import clique, hub, matching, uniform_random
@@ -690,6 +691,7 @@ def run_experiment(config, config_source=None):
             net = Mininet(
                 topo=mininet_topology,
                 link=BatchedTCLink,
+                switch=BatchedOVSSwitch,
                 controller=get_controller_class(config["routing"]["name"]),
                 build=False,
             )
@@ -757,7 +759,7 @@ def run_experiment(config, config_source=None):
     finally:
         try:
             if network_needs_cleanup:
-                net.stop()
+                stop_network(net)
                 network_stopped = True
         finally:
             active_exception = sys.exc_info()[1]
