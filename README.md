@@ -183,3 +183,50 @@ python3 verify_rng.py --dry-run -n 16 -d 4
 # Unit tests (offline)
 python3 -m unittest tests/test_rng_topology.py -v
 ```
+
+## Running large topologies
+
+Large fabrics create tens of thousands of virtual interfaces in the root
+network namespace. For example, `Azure Clos` with 256 leaves, 64 spines and
+2 hosts per leaf creates about 34k. Several host daemons react to every one
+of them. Without mitigation this can starve DNS and keep the machine busy for
+hours. Before a large experiment, quiet them with
+[extra_scripts/mitigate.sh](./extra_scripts/mitigate.sh), and restore the
+system afterwards:
+
+```bash
+sudo /home/rng/Evaluating_RNG/extra_scripts/mitigate.sh on
+# ... run as many experiments as you like ...
+sudo /home/rng/Evaluating_RNG/extra_scripts/mitigate.sh off
+
+# Show the current state (no root needed)
+/home/rng/Evaluating_RNG/extra_scripts/mitigate.sh status
+```
+
+`on` saves the original state in `/var/lib/mininet-mitigate`, and `off`
+restores it. While mitigations are on:
+
+- networkd-dispatcher, systemd-resolved and systemd-udevd are stopped.
+- DNS goes straight to the upstream servers through a static
+  `/etc/resolv.conf`.
+- systemd-networkd and udev leave Mininet interfaces (`s*-eth*`, `h*-eth*`)
+  alone.
+- New interfaces get no IPv6.
+- Hotplugged devices are not handled, because udev is stopped. This doesn't
+  matter on the experiment VM.
+
+If the machine reboots while mitigations are on, the services start again
+but the override files remain. Run `off` and then `on` again before the next
+experiment. If an experiment crashes, clean up Mininet with `sudo mn -c`; the
+mitigations stay as they are.
+
+The runner also batches the steps whose cost grows with fabric size: tc
+shaping, OVS startup, ECMP flow tables, static ARP and teardown. See
+[tc_batch.py](./tc_batch.py) and [mininet_batch.py](./mininet_batch.py).
+Teardown briefly stops and restarts `ovs-vswitchd`, which removes all bridges
+and ports at once, but only when every OVS bridge on the host belongs to the
+experiment. Otherwise it removes them through the running daemon.
+
+For scale, the full 256x64 Azure Clos run with ECMP and a load sweep took
+92 min originally and about 27 min with these changes. Most of the remaining
+time (about 15 min) is OVS adding the 34k switch ports at startup.
