@@ -388,12 +388,15 @@ class ExperimentMetricTests(unittest.TestCase):
 
         self.assertEqual(
             [experiment["name"] for experiment in config["experiments"]],
-            ["UDP iperf throughput"],
+            ["UDP per-flow probe"],
         )
         self.assertEqual(config["routing"]["name"], "Spraypoint")
         self.assertEqual(config["traffic"]["name"], "Uniform random host pairs")
         self.assertEqual(
             config["experiments"][0]["parameters"]["duration_seconds"], 5
+        )
+        self.assertTrue(
+            config["experiments"][0]["parameters"]["concurrent"] is False
         )
         self.assertTrue(
             any("duration" in prompt.lower() for prompt in asked), asked
@@ -407,6 +410,51 @@ class ExperimentMetricTests(unittest.TestCase):
             for marker in ("Choose experiments to run", "Choose a routing option")
         ]
         self.assertEqual(menu_order, sorted(menu_order), asked)
+
+    def test_per_flow_probe_concurrent_parameter(self):
+        default = normalize_run_config(
+            {"experiments": [{"name": "UDP per-flow probe"}]}, "test config"
+        )
+        self.assertFalse(default["experiments"][0]["parameters"]["concurrent"])
+
+        concurrent = normalize_run_config(
+            {
+                "experiments": [
+                    {"name": "UDP per-flow probe", "concurrent": True}
+                ]
+            },
+            "test config",
+        )
+        self.assertTrue(
+            concurrent["experiments"][0]["parameters"]["concurrent"]
+        )
+
+        with self.assertRaisesRegex(ValueError, "concurrent must be a boolean"):
+            normalize_run_config(
+                {
+                    "experiments": [
+                        {"name": "UDP per-flow probe", "concurrent": "yes"}
+                    ]
+                },
+                "test config",
+            )
+
+    def test_interactive_probe_can_enable_concurrent(self):
+        config, _asked = self._asked_interactive(
+            {
+                "Choose a topology": "1",
+                "Choose experiments to run": "4",
+                "Choose a routing option": "1",
+                "Choose a traffic model": "1",
+                "UDP iperf duration": "2",
+                "Run all flows concurrently": "y",
+            }
+        )
+
+        parameters = config["experiments"][0]["parameters"]
+        self.assertEqual(config["experiments"][0]["name"], "UDP per-flow probe")
+        self.assertEqual(parameters["duration_seconds"], 2)
+        self.assertTrue(parameters["concurrent"])
 
     def _asked_interactive(self, answers):
         """Answer the interactive menus, recording every prompt text."""

@@ -1,11 +1,11 @@
 {
   "runs": [
     {
-      "name": "clos-baseline",
+      "name": "clos",
       "topology": {"name": "Clos fat-tree", "parameters": {"k": 4}},
       "routing": {"name": "ECMP shortest path"},
       "traffic": {"name": "Uniform random host pairs", "flow_count": 8, "demand_mbps": 1.0, "seed": 1},
-      "experiments": [{"name": "UDP iperf throughput", "duration_seconds": 2}]
+      "experiments": [{"name": "UDP per-flow probe", "duration_seconds": 2}]
     },
     {
       "name": "rng-ecmp",
@@ -13,19 +13,19 @@
       "routing": {"name": "ECMP shortest path"},
       "traffic": {"name": "Uniform random host pairs", "flow_count": 8, "demand_mbps": 1.0, "seed": 1},
       "experiments": [
-        {"name": "UDP iperf throughput", "duration_seconds": 2},
-        {"name": "Topology oversubscription ratio"}
+        {"name": "UDP per-flow probe", "duration_seconds": 2},
+        {"name": "Static topology analysis"}
       ]
     },
     {
-      "name": "rng-spraypoint",
+      "name": "rng-spray",
       "topology": {"name": "RNG random graph", "parameters": {"n": 8, "d": 3}},
       "routing": {"name": "Spraypoint"},
       "traffic": {"name": "Uniform random host pairs", "flow_count": 8, "demand_mbps": 1.0, "seed": 1},
-      "experiments": [{"name": "UDP iperf throughput", "duration_seconds": 2}]
+      "experiments": [{"name": "UDP per-flow probe", "duration_seconds": 2}]
     },
     {
-      "name": "rng-load-sweep",
+      "name": "rng-sweep",
       "topology": {"name": "RNG random graph", "parameters": {"n": 8, "d": 3}},
       "routing": {"name": "ECMP shortest path"},
       "traffic": {"name": "Matching host pairs", "demand_mbps": 1.0, "seed": 1},

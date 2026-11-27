@@ -16,8 +16,9 @@
       },
       "experiments": [
         {
-          "name": "UDP iperf throughput",
-          "duration_seconds": 5
+          "name": "UDP per-flow probe",
+          "duration_seconds": 5,
+          "concurrent": false
         }
       ]
     },
@@ -37,8 +38,9 @@
       },
       "experiments": [
         {
-          "name": "UDP iperf throughput",
-          "duration_seconds": 10
+          "name": "UDP per-flow probe",
+          "duration_seconds": 10,
+          "concurrent": true
         }
       ]
     }

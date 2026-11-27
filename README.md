@@ -7,8 +7,9 @@ This repo has a wiki where we can place our research, finding, and any considera
 
 The interactive runner lets you choose a topology, traffic model, and one or
 more experiments. The starter setup provides a 4-ary FNSS fat-tree,
-reproducible random host-pair traffic, UDP iperf throughput, and concurrent
-ICMP latency measurements. FNSS builds both the topology and traffic matrix;
+reproducible random host-pair traffic, a UDP per-flow probe (sequential by
+default, concurrent on request), and concurrent ICMP latency measurements.
+FNSS builds both the topology and traffic matrix;
 Mininet runs the network experiments.
 
 Run Mininet experiments with root privileges and the Python environment that
@@ -21,7 +22,9 @@ sudo /home/rng/mininet-env/bin/python /home/rng/Evaluating_RNG/run_experiment.py
 The prompts accept defaults by pressing Enter. Results are saved in a
 timestamped directory under `test-results/`. A `--config` invocation puts every
 run from that config in one combined folder,
-`test-results/batch-<timestamp>-<config>/<NN>-<run name>/`. Each run includes
+`test-results/batch-<timestamp>-<config>/<NN>-<run name>/`. Interactive runs use
+`test-results/<test>-<topology>-<routing>-<timestamp>/`, for example
+`sweep-rng-ecmp-20261127T205649/`. Each run includes
 `results.json`
 (configuration, topology, software, and measurements) and
 `traffic-matrix.xml`, plus files produced by its selected experiment
@@ -52,7 +55,7 @@ protocol's documented OVS/OpenFlow support and `arp` utility.
 
 The runner supports `Clos fat-tree`, `Azure Clos`, `Rail-optimized`, and
 `Jupiter direct-connect` topologies; `Uniform random host pairs`, `Matching
-host pairs`, `Hub`, and `Clique` traffic; and `UDP iperf throughput`, `Load
+host pairs`, `Hub`, and `Clique` traffic; and `UDP per-flow probe`, `Load
 sweep`, and `Static topology analysis` experiments. Omitted fields use
 the same defaults as the interactive menus (4-ary topology, 8 flows at
 1 Mbps, seed 1, and 5-second iperf duration). Every run gets its own results
@@ -64,8 +67,9 @@ expected output and pass criteria.
 Each run also writes `status.log`: timestamped `start`/`done`/`fail` lines with
 elapsed seconds for topology build, traffic planning, Mininet build/start,
 routing, each experiment, and Mininet stop. The load sweep adds `sweep matrix`,
-`idle ping`, `iperf`, and `summary` phases per active fraction, and UDP iperf
-adds one phase per flow. Grep `done` and sort by the trailing seconds to find
+`idle ping`, `iperf`, and `summary` phases per active fraction, and the UDP
+per-flow probe adds one phase per flow (or one concurrent-flows phase when
+`concurrent` is true). Grep `done` and sort by the trailing seconds to find
 the slow phase in a large run. HTB quantum warnings from `tc` are suppressed by
 sizing the queue quantum near 100 KB.
 
@@ -87,11 +91,13 @@ leaf graph and expanding each leaf flow into host flows at the leaf's full
 rate. Azure Clos then defaults to stub hosts for those patterns. Both settings
 can be overridden in a config file.
 
-UDP iperf tests each selected traffic flow in turn. The runner records an idle
-ICMP ping baseline, then runs another ping probe concurrently with each flow
-to capture loaded packet loss and RTT. Both measurements are included with the
-iperf results. Client, server, and ping output are kept in `iperf.log`. Each
-iperf flow is bounded by its configured duration plus a 15-second timeout.
+The UDP per-flow probe runs the selected flows one at a time by default. Each
+flow records an idle ICMP baseline, then another ping probe runs concurrently
+with the iperf flow to capture loaded packet loss and RTT. Set
+`"concurrent": true` on the experiment to run all flows together instead; the
+result is then contention-limited rather than single-flow capacity. Client,
+server, and ping output are kept in `iperf.log`. Each flow is bounded by its
+configured duration plus a 15-second timeout.
 
 The load sweep estimates a paper-style oversubscription ratio for each active
 fraction of leaf switches. It rebuilds the selected traffic pattern using the

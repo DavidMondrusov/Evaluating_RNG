@@ -1,7 +1,7 @@
 {
   "runs": [
     {
-      "name": "rng-spraypoint-smoke",
+      "name": "rng-spray",
       "topology": {
         "name": "RNG random graph",
         "parameters": {
@@ -30,7 +30,7 @@
       },
       "experiments": [
         {
-          "name": "UDP iperf throughput",
+          "name": "UDP per-flow probe",
           "duration_seconds": 3
         }
       ]

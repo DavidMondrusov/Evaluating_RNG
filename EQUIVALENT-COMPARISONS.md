@@ -137,8 +137,9 @@ sudo ~/mininet-env/bin/python3 run_experiment.py --config experiment-config.equi
 All six runs land in one combined folder,
 `test-results/batch-<timestamp>-experiment-config.equivalent-12tor/`, with one
 subdirectory per run named `<NN>-<run name>/` (for example
-`01-rng-12tor-3to1-ecmp/`). Interactive runs still go to
-`test-results/run-<timestamp>/`.
+`01-rng-ecmp/`). Interactive runs use
+`test-results/<test>-<topology>-<routing>-<timestamp>/`, for example
+`sweep-rng-ecmp-20261127T205649/`.
 
 The static-only check needs no root: choose `Static topology analysis` in the
 menu for each topology and compare the table above.

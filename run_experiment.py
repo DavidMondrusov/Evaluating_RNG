@@ -12,6 +12,7 @@ from collections.abc import Mapping
 import fnss
 import networkx
 import mininet
+from mininet.clean import cleanup as cleanup_mininet
 from mininet.link import TCIntf, TCLink
 from mininet.net import Mininet
 
@@ -134,12 +135,29 @@ EXPERIMENTS = {
         "requires_network": False,
         "needs_routing": True,
     },
-    "UDP iperf throughput": {
+    "UDP per-flow probe": {
         "runner": iperf.run,
-        "parameters": {"duration_seconds": 5},
+        "parameters": {"duration_seconds": 5, "concurrent": False},
         "requires_network": True,
         "uses_traffic_demand": True,
     },
+}
+EXPERIMENT_LABELS = {
+    "Load sweep": "sweep",
+    "Static topology analysis": "static",
+    "Spraypoint path length distribution": "paths",
+    "UDP per-flow probe": "iperf",
+}
+TOPOLOGY_LABELS = {
+    "RNG random graph": "rng",
+    "Clos fat-tree": "clos",
+    "Azure Clos": "az",
+    "Jupiter direct-connect": "jup",
+    "Rail-optimized": "rail",
+}
+ROUTING_LABELS = {
+    "ECMP shortest path": "ecmp",
+    "Spraypoint": "spray",
 }
 DEFAULT_TOPOLOGY = next(iter(TOPOLOGIES))
 DEFAULT_TRAFFIC = next(iter(TRAFFIC_MODELS))
@@ -152,7 +170,7 @@ def choose_one(title, choices):
         print(f"\n{title}")
         for index, name in enumerate(options, start=1):
             print(f"  {index}. {name}")
-        answer = input("Select an option: ").strip()
+        answer = input(f"{title}: ").strip()
         if answer.isdigit() and 1 <= int(answer) <= len(options):
             return options[int(answer) - 1]
         print("Enter one of the listed numbers.")
@@ -165,7 +183,7 @@ def choose_many(title, choices):
         for index, name in enumerate(options, start=1):
             print(f"  {index}. {name}")
         answer = input(
-            "Select one or more options (comma-separated, or 'all'): "
+            f"{title} (comma-separated, or 'all'): "
         ).strip()
         if answer.lower() == "all":
             return options
@@ -219,6 +237,19 @@ def prompt_integer(prompt, default):
             return int(answer)
         except ValueError:
             print("Enter an integer.")
+
+
+def prompt_bool(prompt, default):
+    hint = "Y/n" if default else "y/N"
+    while True:
+        answer = input(f"{prompt} [{hint}]: ").strip().lower()
+        if not answer:
+            return default
+        if answer in ("y", "yes"):
+            return True
+        if answer in ("n", "no"):
+            return False
+        print("Enter yes or no.")
 
 
 def require_mapping(value, location, allowed_keys):
@@ -418,6 +449,12 @@ def normalize_run_config(config, location):
                     f"{experiment_location}.duration_seconds must be a "
                     "positive integer"
                 )
+        if "concurrent" in parameters and not isinstance(
+            parameters["concurrent"], bool
+        ):
+            raise ValueError(
+                f"{experiment_location}.concurrent must be a boolean"
+            )
         if "active_fractions" in parameters:
             fractions = parameters["active_fractions"]
             if not isinstance(fractions, list) or not fractions:
@@ -523,11 +560,35 @@ def _slug(text, fallback="run"):
     return cleaned or fallback
 
 
+def run_directory_label(config):
+    experiments = "-".join(
+        EXPERIMENT_LABELS.get(
+            experiment["name"], _slug(experiment["name"], "test")
+        )
+        for experiment in config["experiments"]
+    )
+    topology = TOPOLOGY_LABELS.get(
+        config["topology"]["name"], _slug(config["topology"]["name"], "topo")
+    )
+    parts = [part for part in (experiments, topology) if part]
+    if any(
+        EXPERIMENTS[experiment["name"]].get("requires_network")
+        or EXPERIMENTS[experiment["name"]].get("needs_routing")
+        for experiment in config["experiments"]
+    ):
+        routing = ROUTING_LABELS.get(
+            config["routing"]["name"], _slug(config["routing"]["name"], "route")
+        )
+        if routing:
+            parts.append(routing)
+    return "-".join(parts) or "run"
+
+
 def create_run_directory(parent=None, name=None):
     RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     if parent is None:
-        run_dir = RESULTS_ROOT / f"run-{run_id}"
+        run_dir = RESULTS_ROOT / (f"{name}-{run_id}" if name else run_id)
     else:
         parent.mkdir(parents=True, exist_ok=True)
         run_dir = parent / (name or f"run-{run_id}")
@@ -711,6 +772,10 @@ def interactive_config():
             experiment["duration_seconds"] = prompt_positive_int(
                 "UDP iperf duration per flow (seconds)", 5
             )
+        if "concurrent" in parameters:
+            experiment["concurrent"] = prompt_bool(
+                "Run all flows concurrently", False
+            )
         if "matrix_repetitions" in parameters:
             experiment["matrix_repetitions"] = prompt_positive_int(
                 "Traffic matrices per active fraction", 1
@@ -736,6 +801,8 @@ def interactive_config():
 def run_experiment(config, config_source=None, results_parent=None, run_label=None):
     topology_config = config["topology"]
     traffic_config = config["traffic"]
+    if run_label is None and results_parent is None:
+        run_label = run_directory_label(config)
     run_id, run_dir = create_run_directory(results_parent, run_label)
     status = StatusLog(run_dir / "status.log")
     status.note(
@@ -866,6 +933,8 @@ def run_experiment(config, config_source=None, results_parent=None, run_label=No
                 node: f"h{index}"
                 for index, node in enumerate(host_nodes, start=1)
             }
+            with status.phase("mininet cleanup"):
+                cleanup_mininet()
             with status.phase(
                 "mininet build",
                 nodes=topology.number_of_nodes(),

@@ -1,7 +1,7 @@
 {
   "runs": [
     {
-      "name": "rng-12tor-3to1-ecmp",
+      "name": "rng-ecmp",
       "topology": {
         "name": "RNG random graph",
         "parameters": {
@@ -25,7 +25,7 @@
       ]
     },
     {
-      "name": "azure-12tor-3to1-ecmp",
+      "name": "az-ecmp",
       "topology": {
         "name": "Azure Clos",
         "parameters": {
@@ -51,7 +51,7 @@
       ]
     },
     {
-      "name": "jupiter-12tor-3to1-ecmp",
+      "name": "jup-ecmp",
       "topology": {
         "name": "Jupiter direct-connect",
         "parameters": {
@@ -73,7 +73,7 @@
       ]
     },
     {
-      "name": "rng-12tor-3to1-spraypoint",
+      "name": "rng-spray",
       "topology": {
         "name": "RNG random graph",
         "parameters": {
@@ -97,7 +97,7 @@
       ]
     },
     {
-      "name": "azure-12tor-3to1-spraypoint",
+      "name": "az-spray",
       "topology": {
         "name": "Azure Clos",
         "parameters": {
@@ -123,7 +123,7 @@
       ]
     },
     {
-      "name": "jupiter-12tor-3to1-spraypoint",
+      "name": "jup-spray",
       "topology": {
         "name": "Jupiter direct-connect",
         "parameters": {
