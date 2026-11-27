@@ -51,4 +51,6 @@ def build_topology(
         attributes["capacity"] = capacities[attributes["type"]]
     fnss.set_delays_constant(topology, 1, "ms")
     fnss.set_buffer_sizes_constant(topology, 50, "packets")
+    topology.graph["hosts_per_leaf"] = k // 2
+    topology.graph["host_mode"] = "server"
     return topology

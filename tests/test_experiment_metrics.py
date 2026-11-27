@@ -1,7 +1,9 @@
 import csv
+import io
 import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -24,15 +26,21 @@ from experiments.load_sweep import (
     _traffic_for_active_leaves,
     run as run_load_sweep,
 )
-from experiments.oversubscription import analyze, run
-from run_experiment import normalize_run_config, to_mininet_topology
+from experiments.static_experiment import analyze, run
+from experiments import path_length
+from run_experiment import (
+    DEFAULT_TRAFFIC,
+    interactive_config,
+    normalize_run_config,
+    to_mininet_topology,
+)
 from routing import (
     DEFAULT_ROUTING,
     ROUTING_METHODS,
     get_controller_class,
 )
 from routing import spraypoint as spraypoint_routing
-from topologies import azure_clos, clos
+from topologies import azure_clos, clos, rng
 from traffic.matching import build_traffic as build_matching_traffic
 
 
@@ -43,7 +51,7 @@ class ExperimentMetricTests(unittest.TestCase):
         config = normalize_run_config(
             {
                 "experiments": [
-                    {"name": "Topology oversubscription ratio"}
+                    {"name": "Static topology analysis"}
                 ]
             },
             "test config",
@@ -55,7 +63,7 @@ class ExperimentMetricTests(unittest.TestCase):
             {
                 "routing": {"name": "Spraypoint"},
                 "experiments": [
-                    {"name": "Topology oversubscription ratio"}
+                    {"name": "Static topology analysis"}
                 ],
             },
             "test config",
@@ -81,7 +89,7 @@ class ExperimentMetricTests(unittest.TestCase):
                         {
                             "routing": {"name": removed_name},
                             "experiments": [
-                                {"name": "Topology oversubscription ratio"}
+                                {"name": "Static topology analysis"}
                             ],
                         },
                         "test config",
@@ -228,6 +236,193 @@ class ExperimentMetricTests(unittest.TestCase):
             csv_path = Path(output_dir) / result["csv_file"]
             self.assertTrue(csv_path.is_file())
             self.assertEqual(len(csv_path.read_text().splitlines()), 3)
+            pair_path = Path(output_dir) / result["pair_csv_file"]
+            self.assertTrue(pair_path.is_file())
+
+    def test_static_analysis_counts_edge_disjoint_tor_paths(self):
+        topology = azure_clos.build_topology(
+            leaves=4, spines=2, hosts_per_leaf=2, host_mode="stub"
+        )
+        result = analyze(topology)
+        pairs = result["tor_pairs"]
+
+        self.assertEqual(result["topology_summary"]["tor_count"], 4)
+        self.assertEqual(len(pairs), 6)
+        self.assertEqual({row["edge_disjoint_paths"] for row in pairs}, {2})
+        self.assertEqual({row["shortest_path_hops"] for row in pairs}, {2})
+        self.assertEqual({row["pair_capacity_mbps"] for row in pairs}, {20.0})
+        self.assertEqual(
+            {row["single_path_capacity_min_mbps"] for row in pairs}, {10.0}
+        )
+        self.assertEqual(
+            {row["aggregate_oversubscription_ratio"] for row in pairs}, {1.0}
+        )
+        self.assertEqual(
+            {row["single_path_oversubscription_ratio"] for row in pairs}, {2.0}
+        )
+        self.assertEqual(result["maximum_oversubscription_ratio"], 1.0)
+
+    def test_static_analysis_samples_pairs_deterministically(self):
+        topology = azure_clos.build_topology(
+            leaves=8, spines=2, hosts_per_leaf=1, host_mode="stub"
+        )
+        first = analyze(topology, pair_sample=5)
+        second = analyze(topology, pair_sample=5)
+        analysis = first["pair_analysis"]
+
+        self.assertTrue(analysis["sampled"])
+        self.assertEqual(analysis["analyzed_pairs"], 5)
+        self.assertEqual(analysis["total_pairs"], 28)
+        self.assertEqual(first["tor_pairs"], second["tor_pairs"])
+        self.assertEqual(
+            analysis["worst_pair"]["pair_capacity_mbps"],
+            analysis["pair_capacity_mbps"]["min"],
+        )
+
+    def test_interactive_static_run_skips_routing_and_traffic(self):
+        config, asked = self._asked_interactive(
+            {"Choose a topology": "1", "Choose experiments to run": "2"}
+        )
+
+        self.assertEqual(
+            [experiment["name"] for experiment in config["experiments"]],
+            ["Static topology analysis"],
+        )
+        self.assertEqual(config["routing"]["name"], DEFAULT_ROUTING)
+        self.assertEqual(config["traffic"]["name"], DEFAULT_TRAFFIC)
+        self.assertFalse(
+            any(
+                "routing option" in prompt or "traffic model" in prompt
+                for prompt in asked
+            ),
+            asked,
+        )
+        self.assertFalse(
+            any("duration" in prompt.lower() for prompt in asked), asked
+        )
+
+    def test_interactive_static_run_keeps_azure_server_hosts(self):
+        config, _asked = self._asked_interactive(
+            {"Choose a topology": "3", "Choose experiments to run": "2"}
+        )
+
+        self.assertEqual(config["topology"]["parameters"]["host_mode"], "server")
+
+    def test_path_length_distribution_follows_spraypoint_levels(self):
+        topology = rng.build_topology(n=16, d=4, hosts_per_switch=1)
+        result = path_length.analyze(topology)
+
+        self.assertEqual(result["tor_count"], 16)
+        self.assertEqual(result["source_destination_pairs"], 240)
+        self.assertEqual(result["unreachable_pairs"], 0)
+        fractions = [
+            entry["path_fraction"] for entry in result["hop_distribution"]
+        ]
+        self.assertAlmostEqual(sum(fractions), 1.0)
+        hops = [entry["hops"] for entry in result["hop_distribution"]]
+        self.assertIn(1, hops)
+        self.assertLessEqual(result["max_hops"], 5)
+        self.assertGreater(result["mean_hops"], 2.5)
+        self.assertLess(result["mean_hops"], 3.5)
+
+    def test_path_length_run_writes_csv_and_rejects_ecmp(self):
+        topology = azure_clos.build_topology(
+            leaves=4, spines=4, hosts_per_leaf=2
+        )
+        routing = {
+            "name": "Spraypoint",
+            "parameters": {"p": 2, "h": 1, "l": None, "hash_key": "spraypoint"},
+        }
+        with tempfile.TemporaryDirectory() as output_dir:
+            result = path_length.run(topology, output_dir, routing)
+
+            csv_path = Path(output_dir) / result["csv_file"]
+            self.assertTrue(csv_path.is_file())
+            self.assertEqual(result["routing"]["name"], "Spraypoint")
+            self.assertEqual(
+                [entry["hops"] for entry in result["hop_distribution"]], [2]
+            )
+        with self.assertRaisesRegex(ValueError, "requires routing.name"):
+            path_length.run(topology, tempfile.gettempdir(), {"name": "ECMP shortest path"})
+
+    def test_path_length_requires_spraypoint_routing(self):
+        with self.assertRaisesRegex(ValueError, "must be 'Spraypoint'"):
+            normalize_run_config(
+                {
+                    "topology": {"name": "RNG random graph"},
+                    "routing": {"name": "ECMP shortest path"},
+                    "experiments": [
+                        {"name": "Spraypoint path length distribution"}
+                    ],
+                },
+                "test config",
+            )
+
+    def test_interactive_path_length_pins_spraypoint(self):
+        config, asked = self._asked_interactive(
+            {"Choose experiments to run": "3", "Choose a topology": "1"}
+        )
+
+        self.assertEqual(
+            [experiment["name"] for experiment in config["experiments"]],
+            ["Spraypoint path length distribution"],
+        )
+        self.assertEqual(config["routing"]["name"], "Spraypoint")
+        self.assertFalse(
+            any(
+                "routing option" in prompt or "traffic model" in prompt
+                for prompt in asked
+            ),
+            asked,
+        )
+
+    def test_interactive_iperf_run_asks_routing_traffic_and_duration(self):
+        config, asked = self._asked_interactive(
+            {
+                "Choose a topology": "1",
+                "Choose experiments to run": "4",
+                "Choose a routing option": "2",
+                "Choose a traffic model": "4",
+            }
+        )
+
+        self.assertEqual(
+            [experiment["name"] for experiment in config["experiments"]],
+            ["UDP iperf throughput"],
+        )
+        self.assertEqual(config["routing"]["name"], "Spraypoint")
+        self.assertEqual(config["traffic"]["name"], "Uniform random host pairs")
+        self.assertEqual(
+            config["experiments"][0]["parameters"]["duration_seconds"], 5
+        )
+        self.assertTrue(
+            any("duration" in prompt.lower() for prompt in asked), asked
+        )
+        menu_order = [
+            next(
+                index
+                for index, prompt in enumerate(asked)
+                if marker in prompt
+            )
+            for marker in ("Choose experiments to run", "Choose a routing option")
+        ]
+        self.assertEqual(menu_order, sorted(menu_order), asked)
+
+    def _asked_interactive(self, answers):
+        """Answer the interactive menus, recording every prompt text."""
+        asked = []
+
+        def answer(prompt=""):
+            asked.append(prompt)
+            for marker, reply in answers.items():
+                if marker in prompt:
+                    return reply
+            return ""
+
+        with patch("builtins.input", answer):
+            with redirect_stdout(io.StringIO()):
+                config = interactive_config()
+        return config, asked
 
     def test_ping_summary_includes_packet_loss_and_latency(self):
         result = _parse_ping_output(
@@ -437,6 +632,56 @@ class ExperimentMetricTests(unittest.TestCase):
         self.assertEqual(summary["sent_mbps"], 10.0)
         self.assertEqual(summary["delivered_mbps"], 8.0)
         self.assertAlmostEqual(summary["packet_loss_percent"], 20.0)
+
+    def test_failed_flow_is_excluded_from_ratio_without_infinity(self):
+        flows = {
+            1: ("source1", "destination1", 10.0),
+            2: ("source2", "destination2", 10.0),
+            3: ("source3", "destination3", 10.0),
+            4: ("source4", "destination4", 10.0),
+        }
+        idle = {"avg_rtt_ms": 1.0}
+        measured = {
+            1: (0.0, 0.0, idle, idle, "broken control channel"),
+            2: (10.0, 10.0, idle, idle, None),
+            3: (5.0, 10.0, idle, idle, None),
+            4: (5.0, 10.0, idle, idle, None),
+        }
+        host_leaf = {
+            "source1": "leaf1",
+            "destination1": "leaf2",
+            "source2": "leaf1",
+            "destination2": "leaf2",
+            "source3": "leaf3",
+            "destination3": "leaf4",
+            "source4": "leaf3",
+            "destination4": "leaf4",
+        }
+
+        summary = _summary(1.0, flows, measured, host_leaf=host_leaf)
+
+        self.assertEqual(summary["failed_flow_count"], 1)
+        self.assertEqual(summary["measured_flow_count"], 3)
+        self.assertFalse(summary["valid"])
+        self.assertEqual(summary["minimum_flow_rate_fraction"], 0.5)
+        self.assertEqual(summary["oversubscription_ratio"], 2.0)
+        self.assertNotEqual(summary["oversubscription_ratio"], float("inf"))
+        self.assertAlmostEqual(
+            summary["aggregate_offered_to_delivered_ratio"], 30 / 20
+        )
+
+    def test_all_failed_flows_leave_ratios_empty(self):
+        flows = {1: ("source", "destination", 10.0)}
+        idle = {"avg_rtt_ms": 1.0}
+        measured = {1: (0.0, 0.0, idle, idle, "client timed out")}
+
+        summary = _summary(0.5, flows, measured)
+
+        self.assertFalse(summary["valid"])
+        self.assertEqual(summary["measured_flow_count"], 0)
+        self.assertIsNone(summary["minimum_flow_rate_fraction"])
+        self.assertIsNone(summary["oversubscription_ratio"])
+        self.assertIsNone(summary["aggregate_offered_to_delivered_ratio"])
 
     def test_load_sweep_selects_leaf_fraction_and_rebuilds_traffic(self):
         topology = azure_clos.build_topology(

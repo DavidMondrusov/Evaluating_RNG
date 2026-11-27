@@ -9,7 +9,7 @@ def config(topology):
         {
             "topology": topology,
             "routing": {"name": "ECMP shortest path"},
-            "experiments": [{"name": "Topology oversubscription ratio"}],
+            "experiments": [{"name": "Static topology analysis"}],
         },
         "test",
     )

@@ -12,9 +12,11 @@ from collections.abc import Mapping
 import fnss
 import networkx
 import mininet
+from mininet.link import TCIntf, TCLink
 from mininet.net import Mininet
 
-from experiments import iperf, load_sweep, oversubscription
+from experiments import iperf, load_sweep, path_length, static_experiment
+from experiments.status import StatusLog
 from routing import (
     DEFAULT_ROUTING,
     ROUTING_METHODS,
@@ -22,15 +24,19 @@ from routing import (
     default_parameters as default_routing_parameters,
     get_controller_class,
 )
-from mininet_batch import BatchedOVSSwitch, stop_network
-from tc_batch import BatchedTCLink, batched_tc, flush_tc
 from topologies import azure_clos, clos, jupiter, rail_optimized, rng
-from traffic import clique, hub, matching, uniform_random
+from traffic import _support, clique, hub, matching, uniform_random
 
 
 ROOT = Path(__file__).resolve().parent
 RESULTS_ROOT = ROOT / "test-results"
 TOPOLOGIES = {
+    "RNG random graph": {
+        "builder": rng.build_topology,
+        "parameters": dict(rng.DEFAULT_PARAMETERS),
+        "validator": lambda parameters: rng.validate_parameters(**parameters),
+        "prompts": ("n", "d", "hosts_per_switch"),
+    },
     "Clos fat-tree": {
         "builder": clos.build_topology,
         "parameters": {
@@ -42,23 +48,15 @@ TOPOLOGIES = {
         "validator": clos.validate_parameters,
         "prompts": ("k",),
     },
-    "RNG random graph": {
-        "builder": rng.build_topology,
-        "parameters": dict(rng.DEFAULT_PARAMETERS),
-        "validator": lambda parameters: rng.validate_parameters(**parameters),
-        "prompts": ("n", "d", "hosts_per_switch"),
-    },
-    "Rail-optimized": {
-        "builder": rail_optimized.build_topology,
-        "parameters": dict(rail_optimized.DEFAULT_PARAMETERS),
-        "validator": lambda parameters: rail_optimized.validate_parameters(
-            **parameters
-        ),
+    "Azure Clos": {
+        "builder": azure_clos.build_topology,
+        "parameters": dict(azure_clos.DEFAULT_PARAMETERS),
+        "validator": azure_clos.validate_parameters,
         "prompts": (
-            "scalable_units",
-            "servers_per_unit",
-            "gpus_per_server",
-            "spine_count",
+            "leaves",
+            "spines",
+            "hosts_per_leaf",
+            "leaf_oversubscription",
         ),
     },
     "Jupiter direct-connect": {
@@ -74,43 +72,43 @@ TOPOLOGIES = {
             "hosts_per_tor",
         ),
     },
-    "Azure Clos": {
-        "builder": azure_clos.build_topology,
-        "parameters": dict(azure_clos.DEFAULT_PARAMETERS),
-        "validator": azure_clos.validate_parameters,
+    "Rail-optimized": {
+        "builder": rail_optimized.build_topology,
+        "parameters": dict(rail_optimized.DEFAULT_PARAMETERS),
+        "validator": lambda parameters: rail_optimized.validate_parameters(
+            **parameters
+        ),
         "prompts": (
-            "leaves",
-            "spines",
-            "hosts_per_leaf",
-            "leaf_oversubscription",
+            "scalable_units",
+            "servers_per_unit",
+            "gpus_per_server",
+            "spine_count",
         ),
     },
 }
 TRAFFIC_MODELS = {
-    "Uniform random host pairs": {
-        "builder": uniform_random.build_traffic,
-        "parameters": {"flow_count": 8, "demand_mbps": 1.0, "seed": 1},
-    },
     "Matching host pairs": {
         "builder": matching.build_traffic,
         "parameters": {"demand_mbps": 1.0, "seed": 1},
+        "scope": "tor",
     },
     "Hub": {
         "builder": hub.build_traffic,
         "parameters": {"demand_mbps": 1.0, "seed": 1},
+        "scope": "tor",
     },
     "Clique": {
         "builder": clique.build_traffic,
         "parameters": {"demand_mbps": 1.0, "seed": 1},
+        "scope": "tor",
+    },
+    "Uniform random host pairs": {
+        "builder": uniform_random.build_traffic,
+        "parameters": {"flow_count": 8, "demand_mbps": 1.0, "seed": 1},
+        "scope": "host",
     },
 }
 EXPERIMENTS = {
-    "UDP iperf throughput": {
-        "runner": iperf.run,
-        "parameters": {"duration_seconds": 5},
-        "requires_network": True,
-        "uses_traffic_demand": True,
-    },
     "Load sweep": {
         "runner": load_sweep.run,
         "parameters": {
@@ -122,11 +120,26 @@ EXPERIMENTS = {
         "needs_topology": True,
         "needs_traffic_model": True,
     },
-    "Topology oversubscription ratio": {
-        "runner": oversubscription.run,
+    "Static topology analysis": {
+        "runner": static_experiment.run,
+        "parameters": {
+            "pair_sample": static_experiment.DEFAULT_PAIR_SAMPLE,
+            "pair_seed": static_experiment.DEFAULT_PAIR_SEED,
+        },
+        "requires_network": False,
+    },
+    "Spraypoint path length distribution": {
+        "runner": path_length.run,
         "parameters": {},
         "requires_network": False,
-    }
+        "needs_routing": True,
+    },
+    "UDP iperf throughput": {
+        "runner": iperf.run,
+        "parameters": {"duration_seconds": 5},
+        "requires_network": True,
+        "uses_traffic_demand": True,
+    },
 }
 DEFAULT_TOPOLOGY = next(iter(TOPOLOGIES))
 DEFAULT_TRAFFIC = next(iter(TRAFFIC_MODELS))
@@ -293,6 +306,7 @@ def normalize_run_config(config, location):
         f"{location}.topology.parameters",
         TOPOLOGIES[topology_name]["parameters"],
     )
+    explicit_host_mode = "host_mode" in topology_parameters
     topology_parameters = {
         **TOPOLOGIES[topology_name]["parameters"],
         **topology_parameters,
@@ -317,14 +331,25 @@ def normalize_run_config(config, location):
     traffic_config = require_mapping(
         raw_traffic,
         f"{location}.traffic",
-        {"name", *traffic_parameters},
+        {"name", "scope", *traffic_parameters},
     )
+    traffic_scope = traffic_config.get(
+        "scope", TRAFFIC_MODELS[traffic_name]["scope"]
+    )
+    if traffic_scope not in ("host", "tor"):
+        raise ValueError(f"{location}.traffic.scope must be 'host' or 'tor'")
+    stub_for_tor_traffic = (
+        topology_name == "Azure Clos"
+        and traffic_scope == "tor"
+        and not explicit_host_mode
+    )
+    traffic_config = {**traffic_config, "scope": traffic_scope}
     traffic_parameters = {
         **traffic_parameters,
         **{
             key: value
             for key, value in traffic_config.items()
-            if key != "name"
+            if key not in ("name", "scope")
         },
     }
     if "flow_count" in traffic_parameters:
@@ -426,11 +451,45 @@ def normalize_run_config(config, location):
             {"name": experiment_name, "parameters": parameters}
         )
 
+    if (
+        any(
+            EXPERIMENTS[experiment["name"]].get("needs_routing")
+            for experiment in experiments
+        )
+        and routing_name != "Spraypoint"
+    ):
+        raise ValueError(
+            f"{location}.routing.name must be 'Spraypoint' when the "
+            "'Spraypoint path length distribution' experiment is selected"
+        )
+
+    # Stub hosts exist to represent a leaf's aggregate traffic as one host,
+    # so only a run that actually generates traffic needs them; a static-only
+    # run keeps the topology's own host model.
+    if stub_for_tor_traffic and any(
+        EXPERIMENTS[experiment["name"]]["requires_network"]
+        for experiment in experiments
+    ):
+        topology_parameters["host_mode"] = "stub"
+
+    if (
+        topology_parameters.get("host_mode") == "stub"
+        and traffic_scope != "tor"
+    ):
+        raise ValueError(
+            f"{location}.traffic.scope must be 'tor' when the topology "
+            "uses stub hosts"
+        )
+
     return {
         "name": name.strip() if name else None,
         "routing": {"name": routing_name, "parameters": routing_parameters},
         "topology": {"name": topology_name, "parameters": topology_parameters},
-        "traffic": {"name": traffic_name, **traffic_parameters},
+        "traffic": {
+            "name": traffic_name,
+            "scope": traffic_scope,
+            **traffic_parameters,
+        },
         "experiments": experiments,
     }
 
@@ -454,12 +513,34 @@ def load_config(path):
     ]
 
 
-def create_run_directory():
+def _slug(text, fallback="run"):
+    cleaned = "".join(
+        character if character.isalnum() or character in "-_." else "-"
+        for character in str(text)
+    ).strip("-_.")
+    while "--" in cleaned:
+        cleaned = cleaned.replace("--", "-")
+    return cleaned or fallback
+
+
+def create_run_directory(parent=None, name=None):
     RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    run_dir = RESULTS_ROOT / f"run-{run_id}"
+    if parent is None:
+        run_dir = RESULTS_ROOT / f"run-{run_id}"
+    else:
+        parent.mkdir(parents=True, exist_ok=True)
+        run_dir = parent / (name or f"run-{run_id}")
     run_dir.mkdir()
     return run_id, run_dir
+
+
+def create_batch_directory(config_path):
+    RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    batch_dir = RESULTS_ROOT / f"batch-{stamp}-{_slug(config_path.stem, 'config')}"
+    batch_dir.mkdir()
+    return batch_dir
 
 
 def write_summary(path, summary):
@@ -486,6 +567,32 @@ def topology_snapshot(topology):
             for source, destination, attributes in topology.edges(data=True)
         ],
     }
+
+
+class _QuietTCIntf(TCIntf):
+    """Keep the HTB quantum near 100 KB so tc stops warning about r2q."""
+
+    def bwCmds(self, *args, **kwargs):
+        cmds, parent = super().bwCmds(*args, **kwargs)
+        bandwidth = kwargs.get("bw", args[0] if args else None)
+        if bandwidth:
+            r2q = max(1, round(float(bandwidth) * 1.25))
+            cmds = [
+                command.replace(
+                    "htb default 1", f"htb default 1 r2q {r2q}"
+                )
+                if "qdisc add" in command and "htb" in command
+                else command
+                for command in cmds
+            ]
+        return cmds, parent
+
+
+class _QuietTCLink(TCLink):
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("cls1", _QuietTCIntf)
+        kwargs.setdefault("cls2", _QuietTCIntf)
+        super().__init__(*args, **kwargs)
 
 
 def to_mininet_topology(topology):
@@ -522,6 +629,10 @@ def to_mininet_topology(topology):
 
 def interactive_config():
     print("Network experiment runner")
+    # Experiments come first: the selected ones decide which follow-up menus
+    # are needed (routing for path length, routing and traffic for a Mininet
+    # run), so topology is prompted with that already known.
+    experiment_names = choose_many("Choose experiments to run", EXPERIMENTS)
     topology_name = choose_one("Choose a topology", TOPOLOGIES)
     topology_parameters = dict(TOPOLOGIES[topology_name]["parameters"])
     for parameter_name in TOPOLOGIES[topology_name].get("prompts", ()):
@@ -542,88 +653,154 @@ def interactive_config():
         else:
             value = prompt_positive_float(label, default)
         topology_parameters[parameter_name] = value
-    routing_name = choose_one("Choose a routing option", ROUTING_METHODS)
-    traffic_name = choose_one("Choose a traffic model", TRAFFIC_MODELS)
-    experiment_names = choose_many("Choose experiments to run", EXPERIMENTS)
+    network_required = any(
+        EXPERIMENTS[name]["requires_network"] for name in experiment_names
+    )
+    needs_spraypoint = any(
+        EXPERIMENTS[name].get("needs_routing") for name in experiment_names
+    )
 
-    traffic_defaults = TRAFFIC_MODELS[traffic_name]["parameters"]
-    traffic = {
-        "name": traffic_name,
-        "demand_mbps": traffic_defaults["demand_mbps"],
-        "seed": traffic_defaults["seed"],
-    }
-    if "flow_count" in traffic_defaults:
-        traffic["flow_count"] = prompt_positive_int(
-            "Number of traffic flows", traffic_defaults["flow_count"]
+    # Traffic only shapes a Mininet run; a static topology analysis reads the
+    # topology alone and asks for nothing. Path length analysis is static but
+    # reads Spraypoint's pointing rules, so it pins routing to Spraypoint.
+    routing_name = DEFAULT_ROUTING
+    traffic = None
+    if needs_spraypoint:
+        routing_name = "Spraypoint"
+        print(
+            "\nRouting: Spraypoint "
+            "(required by the path length distribution experiment)"
         )
-    if any(
-        EXPERIMENTS[name].get("uses_traffic_demand")
-        for name in experiment_names
-    ):
-        traffic["demand_mbps"] = prompt_positive_float(
-            "Demand per flow (Mbps)", traffic_defaults["demand_mbps"]
-        )
-        traffic["seed"] = prompt_integer(
-            "Random seed", traffic_defaults["seed"]
-        )
+    elif network_required:
+        routing_name = choose_one("Choose a routing option", ROUTING_METHODS)
+    if network_required:
+        traffic_name = choose_one("Choose a traffic model", TRAFFIC_MODELS)
+        traffic_scope = TRAFFIC_MODELS[traffic_name]["scope"]
+        if topology_name == "Azure Clos":
+            topology_parameters["host_mode"] = (
+                "stub" if traffic_scope == "tor" else "server"
+            )
+        traffic_defaults = TRAFFIC_MODELS[traffic_name]["parameters"]
+        traffic = {
+            "name": traffic_name,
+            "scope": traffic_scope,
+            "demand_mbps": traffic_defaults["demand_mbps"],
+            "seed": traffic_defaults["seed"],
+        }
+        if "flow_count" in traffic_defaults:
+            traffic["flow_count"] = prompt_positive_int(
+                "Number of traffic flows", traffic_defaults["flow_count"]
+            )
+        if any(
+            EXPERIMENTS[name].get("uses_traffic_demand")
+            for name in experiment_names
+        ):
+            if traffic_scope == "host":
+                traffic["demand_mbps"] = prompt_positive_float(
+                    "Demand per flow (Mbps)", traffic_defaults["demand_mbps"]
+                )
+            traffic["seed"] = prompt_integer(
+                "Random seed", traffic_defaults["seed"]
+            )
+
     experiments = []
     for experiment_name in experiment_names:
+        parameters = EXPERIMENTS[experiment_name]["parameters"]
         experiment = {"name": experiment_name}
-        if "duration_seconds" in EXPERIMENTS[experiment_name]["parameters"]:
+        if "duration_seconds" in parameters:
             experiment["duration_seconds"] = prompt_positive_int(
                 "UDP iperf duration per flow (seconds)", 5
             )
-        if experiment_name == "Load sweep":
+        if "matrix_repetitions" in parameters:
             experiment["matrix_repetitions"] = prompt_positive_int(
                 "Traffic matrices per active fraction", 1
             )
         experiments.append(experiment)
-    return normalize_run_config(
-        {
-            "topology": {
-                "name": topology_name,
-                "parameters": topology_parameters,
-            },
-            "routing": {
-                "name": routing_name,
-                "parameters": default_routing_parameters(routing_name),
-            },
-            "traffic": traffic,
-            "experiments": experiments,
+
+    config = {
+        "topology": {
+            "name": topology_name,
+            "parameters": topology_parameters,
         },
-        "interactive run",
-    )
+        "routing": {
+            "name": routing_name,
+            "parameters": default_routing_parameters(routing_name),
+        },
+        "experiments": experiments,
+    }
+    if traffic is not None:
+        config["traffic"] = traffic
+    return normalize_run_config(config, "interactive run")
 
 
-def run_experiment(config, config_source=None):
+def run_experiment(config, config_source=None, results_parent=None, run_label=None):
     topology_config = config["topology"]
     traffic_config = config["traffic"]
-    topology = TOPOLOGIES[topology_config["name"]]["builder"](
-        **topology_config["parameters"]
+    run_id, run_dir = create_run_directory(results_parent, run_label)
+    status = StatusLog(run_dir / "status.log")
+    status.note(
+        f"run {config['name'] or run_id} "
+        f"source={config_source or 'interactive'}"
     )
+    with status.phase(
+        "topology build",
+        name=topology_config["name"],
+        **topology_config["parameters"],
+    ):
+        topology = TOPOLOGIES[topology_config["name"]]["builder"](
+            **topology_config["parameters"]
+        )
     network_required = any(
         EXPERIMENTS[experiment["name"]]["requires_network"]
         for experiment in config["experiments"]
     )
     traffic_matrix = None
+    traffic_flows = None
     if network_required:
-        traffic_matrix = TRAFFIC_MODELS[traffic_config["name"]]["builder"](
-            topology,
-            **{
-                key: value
-                for key, value in traffic_config.items()
-                if key != "name"
-            },
+        with status.phase(
+            "traffic plan",
+            model=traffic_config["name"],
+            scope=traffic_config["scope"],
+        ):
+            builder = TRAFFIC_MODELS[traffic_config["name"]]["builder"]
+            parameters = {
+                key: traffic_config[key]
+                for key in ("demand_mbps", "seed", "flow_count")
+                if key in traffic_config
+            }
+            if traffic_config["scope"] == "host":
+                traffic_matrix = builder(topology, **parameters)
+                traffic_flows = {
+                    flow_id: (source, destination, float(demand))
+                    for flow_id, ((source, destination), demand) in enumerate(
+                        traffic_matrix.flows().items(), start=1
+                    )
+                }
+            else:
+                leaves, hosts_by_leaf = _support.leaf_hosts(topology)
+                traffic_matrix = builder(
+                    _support.leaf_subgraph(topology, leaves), **parameters
+                )
+                traffic_flows = _support.expand_leaf_flows(
+                    traffic_matrix,
+                    topology,
+                    hosts_by_leaf,
+                    _support.host_capacity(topology),
+                )
+        status.note(
+            f"traffic plan: {len(traffic_flows)} host flows from "
+            f"{len(traffic_matrix)} matrix flows"
         )
 
-    run_id, run_dir = create_run_directory()
     traffic_summary = None
     if traffic_matrix is not None:
         traffic_path = run_dir / "traffic-matrix.xml"
         fnss.write_traffic_matrix(traffic_matrix, str(traffic_path))
         traffic_summary = {
             "name": traffic_config["name"],
-            "flow_count": len(traffic_matrix),
+            "scope": traffic_config["scope"],
+            "flow_count": len(traffic_flows),
+            "matrix_flow_count": len(traffic_matrix),
             "demand_mbps": traffic_config["demand_mbps"],
             "seed": traffic_config["seed"],
             "volume_unit": traffic_matrix.attrib["volume_unit"],
@@ -632,9 +809,9 @@ def run_experiment(config, config_source=None):
                 {
                     "source_node": str(source),
                     "destination_node": str(destination),
-                    "demand_mbps": volume,
+                    "demand_mbps": demand,
                 }
-                for (source, destination), volume in traffic_matrix.flows().items()
+                for source, destination, demand in traffic_flows.values()
             ],
         }
 
@@ -679,7 +856,8 @@ def run_experiment(config, config_source=None):
                     "the environment's Python executable via sudo."
                 )
 
-            mininet_topology = to_mininet_topology(topology)
+            with status.phase("mininet convert"):
+                mininet_topology = to_mininet_topology(topology)
             host_nodes = sorted(
                 node for node, attributes in topology.nodes(data=True)
                 if attributes.get("type") == "host"
@@ -688,65 +866,83 @@ def run_experiment(config, config_source=None):
                 node: f"h{index}"
                 for index, node in enumerate(host_nodes, start=1)
             }
-            net = Mininet(
-                topo=mininet_topology,
-                link=BatchedTCLink,
-                switch=BatchedOVSSwitch,
-                controller=get_controller_class(config["routing"]["name"]),
-                build=False,
-            )
-            network_needs_cleanup = True
-            network_stopped = False
-            # tc rescans every interface on each call; batch it so deploy
-            # time stays linear in the number of links (see tc_batch.py).
-            with batched_tc():
+            with status.phase(
+                "mininet build",
+                nodes=topology.number_of_nodes(),
+                links=topology.number_of_edges(),
+            ):
+                net = Mininet(
+                    topo=mininet_topology,
+                    link=_QuietTCLink,
+                    controller=get_controller_class(
+                        config["routing"]["name"]
+                    ),
+                    build=False,
+                )
+                network_needs_cleanup = True
+                network_stopped = False
                 net.build()
-                flush_tc()
+            with status.phase("mininet start"):
                 net.start()
-                flush_tc()
-            summary["routing_setup"] = configure_routing(
-                config["routing"]["name"],
-                net,
-                config["routing"]["parameters"],
-            )
+            with status.phase(
+                "routing configure", name=config["routing"]["name"]
+            ):
+                summary["routing_setup"] = configure_routing(
+                    config["routing"]["name"],
+                    net,
+                    config["routing"]["parameters"],
+                )
             write_summary(summary_path, summary)
         for experiment_config in config["experiments"]:
             experiment_name = experiment_config["name"]
             experiment_definition = EXPERIMENTS[experiment_name]
-            if experiment_definition["requires_network"]:
-                topology_arguments = (
-                    {"topology": topology}
-                    if experiment_definition.get("needs_topology")
-                    else {}
-                )
-                if experiment_definition.get("needs_traffic_model"):
-                    topology_arguments.update(
-                        {
-                            "traffic_name": traffic_config["name"],
-                            "traffic_builder": TRAFFIC_MODELS[
-                                traffic_config["name"]
-                            ]["builder"],
-                            "traffic_parameters": {
-                                key: value
-                                for key, value in traffic_config.items()
-                                if key != "name"
-                            },
-                        }
+            with status.phase("experiment", name=experiment_name):
+                if experiment_definition["requires_network"]:
+                    topology_arguments = (
+                        {"topology": topology}
+                        if experiment_definition.get("needs_topology")
+                        else {}
                     )
-                experiment_result = experiment_definition["runner"](
-                    net,
-                    traffic_matrix,
-                    host_names,
-                    output_dir=run_dir,
-                    **topology_arguments,
-                    **experiment_config["parameters"],
-                )
-            else:
-                experiment_result = experiment_definition["runner"](
-                    topology,
-                    output_dir=run_dir,
-                    **experiment_config["parameters"],
-                )
+                    if experiment_definition.get("needs_traffic_model"):
+                        topology_arguments.update(
+                            {
+                                "traffic_name": traffic_config["name"],
+                                "traffic_builder": TRAFFIC_MODELS[
+                                    traffic_config["name"]
+                                ]["builder"],
+                                "traffic_parameters": {
+                                    key: traffic_config[key]
+                                    for key in (
+                                        "demand_mbps",
+                                        "seed",
+                                        "flow_count",
+                                    )
+                                    if key in traffic_config
+                                },
+                                "traffic_scope": traffic_config["scope"],
+                            }
+                        )
+                    experiment_result = experiment_definition["runner"](
+                        net,
+                        traffic_flows,
+                        host_names,
+                        output_dir=run_dir,
+                        status=status,
+                        **topology_arguments,
+                        **experiment_config["parameters"],
+                    )
+                else:
+                    topology_arguments = (
+                        {"routing": config["routing"]}
+                        if experiment_definition.get("needs_routing")
+                        else {}
+                    )
+                    experiment_result = experiment_definition["runner"](
+                        topology,
+                        output_dir=run_dir,
+                        **topology_arguments,
+                        **experiment_config["parameters"],
+                    )
             summary["experiments"].append(
                 {
                     "name": experiment_name,
@@ -759,7 +955,8 @@ def run_experiment(config, config_source=None):
     finally:
         try:
             if network_needs_cleanup:
-                stop_network(net)
+                with status.phase("mininet stop"):
+                    net.stop()
                 network_stopped = True
         finally:
             active_exception = sys.exc_info()[1]
@@ -775,6 +972,8 @@ def run_experiment(config, config_source=None):
                 }
             summary["completed_at"] = datetime.now(timezone.utc).isoformat()
             write_summary(summary_path, summary)
+            status.note(f"run {summary['status']}")
+            status.close()
 
     if summary["status"] == "completed":
         print(f"\nResults saved in {run_dir}")
@@ -795,19 +994,29 @@ def main(argv=None):
 
     config_path = args.config.expanduser().resolve()
     runs = load_config(config_path)
+    batch_dir = create_batch_directory(config_path)
+    print(f"\nResults folder: {batch_dir}")
     failures = 0
     for index, config in enumerate(runs, start=1):
         label = config["name"] or f"run {index}/{len(runs)}"
+        run_label = f"{index:02d}-{_slug(config['name'], f'run-{index}')}"
         print(f"\n=== {label} ===")
         try:
-            run_experiment(config, config_source=config_path)
+            run_experiment(
+                config,
+                config_source=config_path,
+                results_parent=batch_dir,
+                run_label=run_label,
+            )
         except Exception as error:
             failures += 1
             print(f"Run failed ({type(error).__name__}): {error}", file=sys.stderr)
     if failures:
         print(f"\n{failures} of {len(runs)} configured run(s) failed.", file=sys.stderr)
+        print(f"Partial results in {batch_dir}", file=sys.stderr)
         return 1
     print(f"\nCompleted all {len(runs)} configured run(s).")
+    print(f"Results in {batch_dir}")
     return 0
 
 

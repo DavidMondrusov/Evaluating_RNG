@@ -18,6 +18,7 @@ DEFAULT_PARAMETERS = {
     "leaf_oversubscription": 1.0,
     "delay_ms": 0.05,
     "buffer_packets": 1000,
+    "host_mode": "server",
 }
 
 
@@ -50,6 +51,8 @@ def validate_parameters(parameters):
         or buffer_packets < 1
     ):
         raise ValueError("buffer_packets must be a positive integer")
+    if parameters["host_mode"] not in ("server", "stub"):
+        raise ValueError("host_mode must be 'server' or 'stub'")
 
 
 def build_topology(
@@ -60,6 +63,7 @@ def build_topology(
     leaf_oversubscription=1.0,
     delay_ms=0.05,
     buffer_packets=1000,
+    host_mode="server",
 ):
     """Build an FNSS leaf-spine fabric with ECMP paths between every leaf."""
     validate_parameters(
@@ -71,6 +75,7 @@ def build_topology(
             "leaf_oversubscription": leaf_oversubscription,
             "delay_ms": delay_ms,
             "buffer_packets": buffer_packets,
+            "host_mode": host_mode,
         }
     )
 
@@ -80,11 +85,17 @@ def build_topology(
     for index in range(1, spines + 1):
         topology.add_node(f"spine{index}", type="switch", layer="core")
 
-    host_index = 0
-    for leaf in range(1, leaves + 1):
-        for _ in range(hosts_per_leaf):
-            host_index += 1
-            host = f"host{host_index}"
+    if host_mode == "server":
+        host_index = 0
+        for leaf in range(1, leaves + 1):
+            for _ in range(hosts_per_leaf):
+                host_index += 1
+                host = f"host{host_index}"
+                topology.add_node(host, type="host", layer="leaf")
+                topology.add_edge(f"leaf{leaf}", host, type="edge_leaf")
+    else:
+        for leaf in range(1, leaves + 1):
+            host = f"host{leaf}"
             topology.add_node(host, type="host", layer="leaf")
             topology.add_edge(f"leaf{leaf}", host, type="edge_leaf")
 
@@ -97,6 +108,10 @@ def build_topology(
             )
 
     fnss.set_capacities_constant(topology, host_link_mbps, "Mbps")
+    if host_mode == "stub":
+        for _, _, attributes in topology.edges(data=True):
+            if attributes["type"] == "edge_leaf":
+                attributes["capacity"] = hosts_per_leaf * host_link_mbps
     spine_link_mbps = (
         hosts_per_leaf * host_link_mbps
         / (leaf_oversubscription * spines)
@@ -106,4 +121,7 @@ def build_topology(
             attributes["capacity"] = spine_link_mbps
     fnss.set_delays_constant(topology, delay_ms, "ms")
     fnss.set_buffer_sizes_constant(topology, buffer_packets, "packets")
+    topology.graph["hosts_per_leaf"] = hosts_per_leaf
+    topology.graph["host_link_mbps"] = float(host_link_mbps)
+    topology.graph["host_mode"] = host_mode
     return topology
