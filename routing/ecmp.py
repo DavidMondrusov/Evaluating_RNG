@@ -1,28 +1,17 @@
 """Static ECMP over shortest paths: each switch hashes flows across all
 neighbors one hop closer to the destination host's switch."""
 
-import os
-import shlex
-import tempfile
-
 import networkx
 from mininet.node import OVSSwitch
 
+from . import ovs_batch
+
 
 DEFAULT_PARAMETERS = {}
-OFCTL = "ovs-ofctl -O OpenFlow13"
 
 
 def controller_class():
     return None
-
-
-def _run(switch, command):
-    output = switch.cmd(f"{command}; echo __rc=$?")
-    body, _, status = output.rpartition("__rc=")
-    if status.strip() != "0":
-        raise RuntimeError(f"{switch.name}: {body.strip()}")
-    return body
 
 
 def configure(net, parameters):
@@ -36,20 +25,8 @@ def configure(net, parameters):
     switches = [s for s in net.switches if isinstance(s, OVSSwitch)]
     fabric = graph.subgraph(s.name for s in switches)
 
-    flows = {s.name: [] for s in switches}
+    flows = {s.name: ["priority=0,actions=drop"] for s in switches}
     groups = {s.name: {} for s in switches}  # port tuple -> group id
-
-    for switch in switches:
-        bridge = shlex.quote(switch.name)
-        _run(
-            switch,
-            f"ovs-vsctl set bridge {bridge} protocols=OpenFlow13",
-        )
-        _run(switch, f"ovs-vsctl set-fail-mode {bridge} secure")
-        _run(switch, f"ovs-vsctl del-controller {bridge}")
-        _run(switch, f"{OFCTL} del-flows {bridge}")
-        _run(switch, f"{OFCTL} del-groups {bridge}")
-        _run(switch, f"{OFCTL} add-flow {bridge} priority=0,actions=drop")
 
     for host in net.hosts:
         (edge,) = [n for n in graph.neighbors(host.name) if n in fabric]
@@ -77,35 +54,27 @@ def configure(net, parameters):
                 )
                 action = f"group:{group_id}"
             flows[switch].append(
-                f"priority=100,ip,nw_dst={shlex.quote(host.IP())},"
+                f"priority=100,ip,nw_dst={host.IP()},"
                 f"actions={action}"
             )
 
-    for switch in switches:
-        bridge = shlex.quote(switch.name)
-        for out, group_id in groups[switch.name].items():
-            buckets = ",".join(f"bucket=actions=output:{p}" for p in out)
-            _run(
-                switch,
-                f"{OFCTL} add-group {bridge} "
-                f"group_id={group_id},type=select,{buckets}",
-            )
-        fd, path = tempfile.mkstemp()
-        try:
-            with os.fdopen(fd, "w") as flow_file:
-                flow_file.write("\n".join(flows[switch.name]) + "\n")
-            _run(
-                switch,
-                f"{OFCTL} add-flows {bridge} {shlex.quote(path)}",
-            )
-        finally:
-            os.unlink(path)
-    net.staticArp()
+    ovs_batch.install({
+        name: (
+            [
+                f"group_id={group_id},type=select,"
+                + ",".join(f"bucket=actions=output:{p}" for p in out)
+                for out, group_id in groups[name].items()
+            ],
+            flows[name],
+        )
+        for name in flows
+    })
+    ovs_batch.install_static_arp(net)
     return {
         "deployed": True,
         "deployment_mode": "ecmp",
         "switch_count": len(switches),
-        "flow_count": sum(len(f) for f in flows.values()),
+        "flow_count": sum(len(f) - 1 for f in flows.values()),  # minus drop rule
         "group_count": sum(
             len(groups_by_ports) for groups_by_ports in groups.values()
         ),
