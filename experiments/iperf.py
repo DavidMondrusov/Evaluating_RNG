@@ -1,5 +1,6 @@
 import csv
 import json
+import random
 import re
 import signal
 import subprocess
@@ -366,11 +367,25 @@ def measure_idle(net, flows, host_names):
     return latency
 
 
+def source_ports(flow_ids, seed):
+    """Choose a fixed UDP source port for each flow, based on the seed.
+
+    With fixed source ports, ECMP and Spraypoint hash each flow onto the same
+    path in every run with the same seed. The ports are below 32768, so they
+    never collide with the ports Linux assigns automatically.
+    """
+    base = random.Random(seed).randrange(10000, 20000)
+    return {flow_id: base + flow_id for flow_id in flow_ids}
+
+
 def run_flows_concurrently(
     net, flows, host_names, duration_seconds, log_file, idle_latency=None,
-    status=None,
+    status=None, ports=None,
 ):
-    """Run every flow at once, one port per flow, and return per-flow results."""
+    """Run every flow at once, one port per flow, and return per-flow results.
+
+    `ports` optionally maps each flow to the UDP source port it must use.
+    """
     if idle_latency is None:
         idle_latency = measure_idle(net, flows, host_names)
 
@@ -416,6 +431,7 @@ def run_flows_concurrently(
                     # seconds instead of waiting for the read timeout below.
                     "--connect-timeout",
                     "3000",
+                    *(["--cport", str(ports[flow_id])] if ports else []),
                 ],
                 **PROCESS_KWARGS,
             )
@@ -427,11 +443,17 @@ def run_flows_concurrently(
             status.note(f"clients started ({len(clients)})")
         # Give all clients one shared deadline. A client can hang if its
         # traffic is lost, and a separate timeout for each client would add up.
+        # A client that has already exited is read without a timeout, so its
+        # output is collected even after the deadline has passed.
         deadline = time.monotonic() + duration_seconds + 15
         for flow_id in flows:
+            client_process = clients[flow_id]
             try:
                 client_output = _read_output(
-                    clients[flow_id], max(0, deadline - time.monotonic())
+                    client_process,
+                    None
+                    if client_process.poll() is not None
+                    else max(0, deadline - time.monotonic()),
                 )
             except subprocess.TimeoutExpired as error:
                 client_output = error.output or ""
@@ -536,6 +558,7 @@ COLUMNS = (
     "server_received_rate",
     "client_reported_rate",
     "flow_failed",
+    "connect_failed",
     *(
         f"{phase}_ping_{metric}"
         for phase in ("idle", "loaded")
@@ -562,6 +585,11 @@ def _result(flow_id, source, destination, host_names, demand_mbps, measured):
         "server_received_rate": server_rate,
         "client_reported_rate": client_rate,
         "flow_failed": failure_reason is not None,
+        # iperf3 prints "unable to connect" when its TCP control connection
+        # never reached the server, so no UDP traffic was sent at all.
+        "connect_failed": (
+            failure_reason is not None and "unable to connect" in failure_reason
+        ),
         "idle_latency": idle_latency,
         "loaded_latency": loaded_latency,
     }
@@ -594,8 +622,13 @@ def run(
     output_dir,
     concurrent=False,
     status=None,
+    traffic_seed=None,
 ):
-    """Measure UDP throughput and concurrent ICMP latency for each flow."""
+    """Measure UDP throughput and concurrent ICMP latency for each flow.
+
+    In concurrent mode, `traffic_seed` fixes each flow's UDP source port (see
+    `source_ports`).
+    """
     output_dir = Path(output_dir)
     phase = status.phase if status else (lambda *args, **kwargs: nullcontext())
     log_path = output_dir / "iperf.log"
@@ -639,6 +672,11 @@ def run(
                         host_names,
                         duration_seconds,
                         log_file,
+                        ports=(
+                            None
+                            if traffic_seed is None
+                            else source_ports(flows, traffic_seed)
+                        ),
                         **run_kwargs,
                     )
             for flow_id, (source, destination, demand_mbps) in flows.items():

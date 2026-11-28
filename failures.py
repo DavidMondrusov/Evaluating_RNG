@@ -116,7 +116,9 @@ def flow_class(intact, failed, lost):
         return "endpoint_lost"
     after = _rate(failed)
     if after <= 0:
-        return "fabric_dead"
+        # iperf3's TCP control connection takes its own path, which is not
+        # fixed between runs, so this outcome can differ between runs.
+        return "connect_failed" if failed.get("connect_failed") else "fabric_dead"
     if after < DEGRADED_FRACTION * _rate(intact):
         return "degraded"
     return "unaffected"

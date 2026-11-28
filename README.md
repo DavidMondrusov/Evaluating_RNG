@@ -222,6 +222,9 @@ list) shows each flow's rate in every phase, with one of these labels for the
 * `unaffected`: delivers at least 90% of its `intact` rate.
 * `degraded`: still delivers traffic, but less than 90% of its `intact` rate.
 * `fabric_dead`: both hosts still work, but no traffic gets through.
+* `connect_failed`: both hosts still work, but iperf3 could not set up the
+  test, because its TCP control connection was routed over a failed link. See
+  the caveat below.
 * `endpoint_lost`: the sending or receiving host was attached to a failed
   switch. No topology can save such a flow, so compare topologies on
   `fabric_dead`, not on this label.
@@ -235,10 +238,13 @@ and `RNG random graph` with `Spraypoint`. Any other combination stops with an
 error before Mininet starts. The UDP per-flow probe must use
 `"concurrent": true`.
 
-Running the same config twice fails the same links or switches, but the flows
-that die in the `stale` phase can be different. Each switch chooses a flow's
-path from the flow's port numbers, and iperf3 uses different port numbers in
-every run. Run the config several times to see how much the results vary.
+Caveat: running the same config twice gives the same `fabric_dead` flows, but
+the `connect_failed` flows can differ. With `"concurrent": true`, each flow's
+UDP traffic uses a fixed source port chosen from the traffic `seed`, so it
+takes the same path in every run. iperf3 also opens a TCP control connection
+for each flow, and that connection always uses a random port, so its path
+changes between runs. iperf3 has no option to fix that port. Treat
+`connect_failed` counts as noisy, and repeat a run to see how much they vary.
 
 To run the example, which fails links and switches in a 4-ary fat-tree and in
 an RNG of the same size (8 switches with 2 hosts each, 1:1 oversubscription):

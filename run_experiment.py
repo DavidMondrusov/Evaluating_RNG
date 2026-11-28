@@ -141,6 +141,7 @@ EXPERIMENTS = {
         "parameters": {"duration_seconds": 5, "concurrent": False},
         "requires_network": True,
         "uses_traffic_demand": True,
+        "needs_traffic_seed": True,
     },
 }
 EXPERIMENT_LABELS = {
@@ -973,6 +974,8 @@ def run_experiment(config, config_source=None, results_parent=None, run_label=No
                         if experiment_definition.get("needs_topology")
                         else {}
                     )
+                    if experiment_definition.get("needs_traffic_seed"):
+                        topology_arguments["traffic_seed"] = traffic_config["seed"]
                     if experiment_definition.get("needs_traffic_model"):
                         topology_arguments.update(
                             {

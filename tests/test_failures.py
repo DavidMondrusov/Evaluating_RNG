@@ -6,6 +6,7 @@ from pathlib import Path
 import fnss
 
 import failures
+from experiments.iperf import source_ports
 from run_experiment import normalize_run_config
 from topologies import clos
 
@@ -14,7 +15,7 @@ def switches(topology):
     return {n for n, a in topology.nodes(data=True) if a["type"] == "switch"}
 
 
-def flow(flow_id, source, destination, rate, failed=False):
+def flow(flow_id, source, destination, rate, failed=False, connect_failed=False):
     return {
         "flow_id": flow_id,
         "source_host": source,
@@ -22,6 +23,7 @@ def flow(flow_id, source, destination, rate, failed=False):
         "offered_mbps": 1.0,
         "server_received_rate": rate,
         "flow_failed": failed,
+        "connect_failed": connect_failed,
     }
 
 
@@ -100,9 +102,20 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(failures.flow_class(intact, flow(1, "h1", "h2", 1.0), set()), "unaffected")
         self.assertEqual(failures.flow_class(intact, flow(1, "h1", "h2", 0.5), set()), "degraded")
         self.assertEqual(failures.flow_class(intact, flow(1, "h1", "h2", 0.0, True), set()), "fabric_dead")
+        self.assertEqual(
+            failures.flow_class(intact, flow(1, "h1", "h2", 0.0, True, connect_failed=True), set()),
+            "connect_failed",
+        )
         self.assertEqual(failures.flow_class(intact, flow(1, "h1", "h2", 0.0, True), {"h2"}), "endpoint_lost")
         dead = flow(1, "h1", "h2", 0.0, True)
         self.assertEqual(failures.flow_class(dead, dead, set()), "failed_intact")
+
+    def test_source_ports_depend_only_on_seed(self):
+        ports = source_ports(range(1, 101), seed=7)
+        self.assertEqual(ports, source_ports(range(1, 101), seed=7))
+        self.assertNotEqual(ports, source_ports(range(1, 101), seed=8))
+        self.assertEqual(len(set(ports.values())), 100)
+        self.assertTrue(all(port < 32768 for port in ports.values()))
 
     def test_compare_flows_writes_rows_and_counts(self):
         phases = {
