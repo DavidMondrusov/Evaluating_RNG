@@ -3,6 +3,8 @@ import ipaddress
 import sys
 from pathlib import Path
 
+from mininet_batch import link_is_up
+
 
 PROTOCOL_ROOT = Path(__file__).resolve().parent.parent / "spraypoint-protocol"
 DEFAULT_PARAMETERS = {
@@ -101,6 +103,13 @@ def configure(net, parameters):
 
     params = SpraypointParams(**parameters)
     deployer = SpraypointDeployer(net, params)
+    # Remove links that are down from Spraypoint's view of the network, so it
+    # computes routes from the surviving links, as its link-state protocol does.
+    for link in net.links:
+        if not link_is_up(link):
+            a, b = link.intf1.node.name, link.intf2.node.name
+            deployer.graph.ports.get(a, {}).pop(b, None)
+            deployer.graph.ports.get(b, {}).pop(a, None)
     installed = deployer.deploy_full_mesh()
     return {
         "deployed": True,

@@ -106,7 +106,7 @@ class ExperimentMetricTests(unittest.TestCase):
         with patch.object(spraypoint, "SpraypointDeployer") as deployer_class:
             deployer_class.return_value.deploy_full_mesh.return_value = installed
             result = spraypoint_routing.configure(
-                object(),
+                SimpleNamespace(links=[]),
                 {"p": 2, "h": 1, "l": None, "hash_key": "test"},
             )
 

@@ -221,6 +221,19 @@ def root_namespace_end(link):
     return None
 
 
+def link_is_up(link):
+    """Return whether the link is up. A failure takes links down.
+
+    The state is read from a file in /sys for the switch's end of the link,
+    which is much faster than running a command for each link.
+    """
+    intf = root_namespace_end(link)
+    if intf is None:
+        return True
+    with open(f"/sys/class/net/{intf.name}/operstate", encoding="utf-8") as state:
+        return state.read().strip() == "up"
+
+
 def _ip_batch(lines):
     path = _write_batch_file(lines)
     try:

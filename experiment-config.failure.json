@@ -1,0 +1,39 @@
+{
+  "runs": [
+    {
+      "name": "clos-ecmp-link-failure",
+      "topology": {"name": "Clos fat-tree", "parameters": {"k": 4}},
+      "routing": {"name": "ECMP shortest path"},
+      "traffic": {"name": "Uniform random host pairs", "flow_count": 8, "demand_mbps": 1.0, "seed": 1},
+      "experiments": [{"name": "UDP per-flow probe", "duration_seconds": 3, "concurrent": true}],
+      "failure": {"mode": "link", "count": 2, "seed": 1}
+    },
+    {
+      "name": "clos-ecmp-node-failure",
+      "topology": {"name": "Clos fat-tree", "parameters": {"k": 4}},
+      "routing": {"name": "ECMP shortest path"},
+      "traffic": {"name": "Uniform random host pairs", "flow_count": 8, "demand_mbps": 1.0, "seed": 1},
+      "experiments": [
+        {"name": "UDP per-flow probe", "duration_seconds": 3, "concurrent": true},
+        {"name": "Static topology analysis"}
+      ],
+      "failure": {"mode": "node", "count": 1, "seed": 1}
+    },
+    {
+      "name": "rng-spraypoint-link-failure",
+      "topology": {"name": "RNG random graph", "parameters": {"n": 8, "d": 3, "hosts_per_switch": 2, "fabric_link_mbps": 6.667}},
+      "routing": {"name": "Spraypoint"},
+      "traffic": {"name": "Uniform random host pairs", "flow_count": 8, "demand_mbps": 1.0, "seed": 1},
+      "experiments": [{"name": "UDP per-flow probe", "duration_seconds": 3, "concurrent": true}],
+      "failure": {"mode": "link", "count": 2, "seed": 1}
+    },
+    {
+      "name": "rng-spraypoint-node-failure",
+      "topology": {"name": "RNG random graph", "parameters": {"n": 8, "d": 3, "hosts_per_switch": 2, "fabric_link_mbps": 6.667}},
+      "routing": {"name": "Spraypoint"},
+      "traffic": {"name": "Uniform random host pairs", "flow_count": 8, "demand_mbps": 1.0, "seed": 1},
+      "experiments": [{"name": "UDP per-flow probe", "duration_seconds": 3, "concurrent": true}],
+      "failure": {"mode": "node", "count": 1, "seed": 1}
+    }
+  ]
+}

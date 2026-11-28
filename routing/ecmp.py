@@ -9,7 +9,7 @@ import tempfile
 import networkx
 from mininet.node import OVSSwitch
 
-from mininet_batch import static_arp
+from mininet_batch import link_is_up, static_arp
 
 
 DEFAULT_PARAMETERS = {}
@@ -89,6 +89,8 @@ def configure(net, parameters):
     graph = networkx.Graph()
     ports = {}  # (node, neighbor) -> OpenFlow port on node
     for link in net.links:
+        if not link_is_up(link):  # failed links carry no routes
+            continue
         a, b = link.intf1, link.intf2
         graph.add_edge(a.node.name, b.node.name)
         ports[a.node.name, b.node.name] = a.node.ports[a]
@@ -102,6 +104,10 @@ def configure(net, parameters):
     _configure_bridges([switch.name for switch in switches])
 
     for host in net.hosts:
+        # A host whose only link is down (for example, because its switch
+        # failed) cannot be reached, so no switch gets a route to it.
+        if host.name not in graph:
+            continue
         (edge,) = [n for n in graph.neighbors(host.name) if n in fabric]
         distance = networkx.single_source_shortest_path_length(fabric, edge)
         for switch in fabric:
