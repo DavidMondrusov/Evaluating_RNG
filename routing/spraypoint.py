@@ -1,7 +1,14 @@
 import importlib.util
 import ipaddress
 import sys
+import os
+import shlex
+import tempfile
 from pathlib import Path
+
+from mininet_batch import static_arp
+
+from . import ecmp
 
 
 PROTOCOL_ROOT = Path(__file__).resolve().parent.parent / "spraypoint-protocol"
@@ -100,8 +107,29 @@ def configure(net, parameters):
     SpraypointDeployer, SpraypointParams = load_protocol()
 
     params = SpraypointParams(**parameters)
-    deployer = SpraypointDeployer(net, params)
-    installed = deployer.deploy_full_mesh()
+    deployer = SpraypointDeployer(net, params, static_arp=False)
+    installed = deployer.compiler.compile_full_mesh()
+    # Same fast path as ECMP: one ovs-vsctl transaction for all bridges, one
+    # OpenFlow bundle per switch, and batched static ARP.
+    ecmp._configure_bridges(sorted(installed))
+    for switch in net.switches:
+        rules = installed.get(switch.name)
+        if rules is None:
+            continue
+        lines = ["flow delete", "group delete group_id=all"]
+        lines += [f"group add {rules.groups[g].to_ofctl()}" for g in sorted(rules.groups)]
+        lines += [f"flow add {flow.to_ofctl()}" for flow in rules.flows]
+        fd, path = tempfile.mkstemp()
+        try:
+            with os.fdopen(fd, "w") as bundle_file:
+                bundle_file.write("\n".join(lines) + "\n")
+            ecmp._run(
+                switch,
+                f"{ecmp.OFCTL_BUNDLE} {shlex.quote(switch.name)} {shlex.quote(path)}",
+            )
+        finally:
+            os.unlink(path)
+    static_arp(net)
     return {
         "deployed": True,
         "switch_count": len(installed),
