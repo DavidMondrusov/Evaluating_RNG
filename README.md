@@ -190,6 +190,64 @@ python3 verify_rng.py --dry-run -n 16 -d 4
 python3 -m unittest tests/test_rng_topology.py -v
 ```
 
+### Failure modeling
+
+To see how a failure changes the results of the same experiments, add a
+`failure` block to a run in a JSON config:
+
+```json
+"failure": {"mode": "link", "count": 2, "seed": 1}
+```
+
+* `mode`: `"link"` takes down `count` links between two switches. `"node"`
+  takes down `count` switches, together with all of their links, including the
+  links to their hosts.
+* `seed` decides which links or switches fail. The same seed on the same
+  topology always fails the same ones.
+
+The run then measures every experiment three times on the same network:
+
+1. `intact`: before the failure.
+2. `stale`: after the failure, while the switches still use their old routes.
+   Traffic sent toward a failed link or switch is lost.
+3. `rerouted`: after the routes are recomputed using only the links that still
+   work.
+
+Each phase's files are saved in its own folder (`intact/`, `stale/`,
+`rerouted/`) inside the run's results folder. For the UDP per-flow probe,
+`failure-flows-<n>.csv` (`<n>` is the probe's position in the run's experiment
+list) shows each flow's rate in every phase, with one of these labels for the
+`stale` and `rerouted` phases:
+
+* `unaffected`: delivers at least 90% of its `intact` rate.
+* `degraded`: still delivers traffic, but less than 90% of its `intact` rate.
+* `fabric_dead`: both hosts still work, but no traffic gets through.
+* `endpoint_lost`: the sending or receiving host was attached to a failed
+  switch. No topology can save such a flow, so compare topologies on
+  `fabric_dead`, not on this label.
+* `failed_intact`: the flow already failed before the failure.
+
+`results.json` lists the failed switches and links (Mininet names), the hosts
+that lost their switch, and how many flows got each label.
+
+Only two combinations are supported: `Clos fat-tree` with `ECMP shortest path`,
+and `RNG random graph` with `Spraypoint`. Any other combination stops with an
+error before Mininet starts. The UDP per-flow probe must use
+`"concurrent": true`.
+
+Running the same config twice fails the same links or switches, but the flows
+that die in the `stale` phase can be different. Each switch chooses a flow's
+path from the flow's port numbers, and iperf3 uses different port numbers in
+every run. Run the config several times to see how much the results vary.
+
+To run the example, which fails links and switches in a 4-ary fat-tree and in
+an RNG of the same size (8 switches with 2 hosts each, 1:1 oversubscription):
+
+```bash
+sudo /home/rng/mininet-env/bin/python /home/rng/Evaluating_RNG/run_experiment.py \
+  --config /home/rng/Evaluating_RNG/experiment-config.failure.json
+```
+
 ## Running large topologies
 
 Large fabrics create tens of thousands of virtual interfaces in the root

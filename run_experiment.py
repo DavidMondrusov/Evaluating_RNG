@@ -16,6 +16,7 @@ from mininet.clean import cleanup as cleanup_mininet
 from mininet.link import TCIntf, TCLink
 from mininet.net import Mininet
 
+import failures
 from experiments import iperf, load_sweep, path_length, static_experiment
 from experiments.status import StatusLog
 from routing import (
@@ -268,7 +269,7 @@ def normalize_run_config(config, location):
     config = require_mapping(
         config,
         location,
-        {"name", "topology", "routing", "traffic", "experiments"},
+        {"name", "topology", "routing", "traffic", "experiments", "failure"},
     )
     name = config.get("name")
     if name is not None and (not isinstance(name, str) or not name.strip()):
@@ -528,7 +529,51 @@ def normalize_run_config(config, location):
             **traffic_parameters,
         },
         "experiments": experiments,
+        "failure": (
+            None
+            if config.get("failure") is None
+            else normalize_failure(
+                config["failure"],
+                topology_name,
+                routing_name,
+                experiments,
+                f"{location}.failure",
+            )
+        ),
     }
+
+
+def normalize_failure(failure, topology_name, routing_name, experiments, location):
+    failure = require_mapping(failure, location, {"mode", "count", "seed"})
+    if (topology_name, routing_name) not in failures.SUPPORTED:
+        supported = "; ".join(
+            f"{topology} with {routing}"
+            for topology, routing in sorted(failures.SUPPORTED)
+        )
+        raise NotImplementedError(
+            f"Failures are not modeled for {topology_name} with "
+            f"{routing_name}. Supported: {supported}."
+        )
+    mode = failure.get("mode")
+    if mode not in failures.MODES:
+        raise ValueError(f"{location}.mode must be \"node\" or \"link\"")
+    count = failure.get("count", 1)
+    if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+        raise ValueError(f"{location}.count must be a positive integer")
+    seed = failure.get("seed", 1)
+    if not isinstance(seed, int) or isinstance(seed, bool):
+        raise ValueError(f"{location}.seed must be an integer")
+    for experiment in experiments:
+        if (
+            experiment["name"] == "UDP per-flow probe"
+            and not experiment["parameters"]["concurrent"]
+        ):
+            raise ValueError(
+                f"{location}: set \"concurrent\": true on the UDP per-flow "
+                "probe. Without it, the first flow that loses its path stops "
+                "the probe."
+            )
+    return {"mode": mode, "count": count, "seed": seed}
 
 
 def load_config(path):
@@ -911,6 +956,72 @@ def run_experiment(config, config_source=None, results_parent=None, run_label=No
     summary_path = run_dir / "results.json"
     write_summary(summary_path, summary)
 
+    def run_experiments(results, output_dir, phase_topology):
+        """Run every configured experiment and append its result to `results`.
+
+        Network experiments always use the full topology, so they send the
+        same traffic in every phase. Experiments without a network analyze
+        `phase_topology`, which leaves out failed parts.
+        """
+        for experiment_config in config["experiments"]:
+            experiment_name = experiment_config["name"]
+            experiment_definition = EXPERIMENTS[experiment_name]
+            with status.phase("experiment", name=experiment_name):
+                if experiment_definition["requires_network"]:
+                    topology_arguments = (
+                        {"topology": topology}
+                        if experiment_definition.get("needs_topology")
+                        else {}
+                    )
+                    if experiment_definition.get("needs_traffic_model"):
+                        topology_arguments.update(
+                            {
+                                "traffic_name": traffic_config["name"],
+                                "traffic_builder": TRAFFIC_MODELS[
+                                    traffic_config["name"]
+                                ]["builder"],
+                                "traffic_parameters": {
+                                    key: traffic_config[key]
+                                    for key in (
+                                        "demand_mbps",
+                                        "seed",
+                                        "flow_count",
+                                    )
+                                    if key in traffic_config
+                                },
+                                "traffic_scope": traffic_config["scope"],
+                            }
+                        )
+                    experiment_result = experiment_definition["runner"](
+                        net,
+                        traffic_flows,
+                        host_names,
+                        output_dir=output_dir,
+                        status=status,
+                        **topology_arguments,
+                        **experiment_config["parameters"],
+                    )
+                else:
+                    topology_arguments = (
+                        {"routing": config["routing"]}
+                        if experiment_definition.get("needs_routing")
+                        else {}
+                    )
+                    experiment_result = experiment_definition["runner"](
+                        phase_topology,
+                        output_dir=output_dir,
+                        **topology_arguments,
+                        **experiment_config["parameters"],
+                    )
+            results.append(
+                {
+                    "name": experiment_name,
+                    "parameters": experiment_config["parameters"],
+                    **experiment_result,
+                }
+            )
+            write_summary(summary_path, summary)
+
     net = None
     network_needs_cleanup = False
     experiments_completed = False
@@ -962,63 +1073,62 @@ def run_experiment(config, config_source=None, results_parent=None, run_label=No
                     config["routing"]["parameters"],
                 )
             write_summary(summary_path, summary)
-        for experiment_config in config["experiments"]:
-            experiment_name = experiment_config["name"]
-            experiment_definition = EXPERIMENTS[experiment_name]
-            with status.phase("experiment", name=experiment_name):
-                if experiment_definition["requires_network"]:
-                    topology_arguments = (
-                        {"topology": topology}
-                        if experiment_definition.get("needs_topology")
-                        else {}
-                    )
-                    if experiment_definition.get("needs_traffic_model"):
-                        topology_arguments.update(
-                            {
-                                "traffic_name": traffic_config["name"],
-                                "traffic_builder": TRAFFIC_MODELS[
-                                    traffic_config["name"]
-                                ]["builder"],
-                                "traffic_parameters": {
-                                    key: traffic_config[key]
-                                    for key in (
-                                        "demand_mbps",
-                                        "seed",
-                                        "flow_count",
-                                    )
-                                    if key in traffic_config
-                                },
-                                "traffic_scope": traffic_config["scope"],
-                            }
-                        )
-                    experiment_result = experiment_definition["runner"](
-                        net,
-                        traffic_flows,
-                        host_names,
-                        output_dir=run_dir,
-                        status=status,
-                        **topology_arguments,
-                        **experiment_config["parameters"],
-                    )
-                else:
-                    topology_arguments = (
-                        {"routing": config["routing"]}
-                        if experiment_definition.get("needs_routing")
-                        else {}
-                    )
-                    experiment_result = experiment_definition["runner"](
-                        topology,
-                        output_dir=run_dir,
-                        **topology_arguments,
-                        **experiment_config["parameters"],
-                    )
-            summary["experiments"].append(
-                {
-                    "name": experiment_name,
-                    "parameters": experiment_config["parameters"],
-                    **experiment_result,
-                }
+        if config["failure"] is None:
+            run_experiments(summary["experiments"], run_dir, topology)
+        else:
+            failed_switches, failed_links = failures.choose(
+                topology, **config["failure"]
             )
+            names = failures.mininet_names(topology)
+            lost = {
+                names[host]
+                for host in failures.lost_hosts(topology, failed_switches)
+            }
+            summary["failure"] = {
+                **config["failure"],
+                "failed_switches": [names[node] for node in failed_switches],
+                "failed_links": [[names[u], names[v]] for u, v in failed_links],
+                "lost_hosts": sorted(lost),
+            }
+            summary["phases"] = {phase: [] for phase in failures.PHASES}
+            remaining = failures.surviving(
+                topology, failed_switches, failed_links
+            )
+            for phase in failures.PHASES:
+                if net is not None and phase == "stale":
+                    with status.phase("failure apply", links=len(failed_links)):
+                        failures.apply(net, topology, failed_links)
+                if net is not None and phase == "rerouted":
+                    with status.phase(
+                        "routing reconfigure", name=config["routing"]["name"]
+                    ):
+                        summary["rerouting_setup"] = configure_routing(
+                            config["routing"]["name"],
+                            net,
+                            config["routing"]["parameters"],
+                        )
+                phase_dir = run_dir / phase
+                phase_dir.mkdir()
+                run_experiments(
+                    summary["phases"][phase],
+                    phase_dir,
+                    topology if phase == "intact" else remaining,
+                )
+            summary["failure"]["flow_classes"] = {}
+            for index, intact in enumerate(summary["phases"]["intact"], start=1):
+                if "flows" not in intact:
+                    continue
+                csv_name = f"failure-flows-{index}.csv"
+                summary["failure"]["flow_classes"][csv_name] = (
+                    failures.compare_flows(
+                        {
+                            phase: summary["phases"][phase][index - 1]["flows"]
+                            for phase in failures.PHASES
+                        },
+                        lost,
+                        run_dir / csv_name,
+                    )
+                )
             write_summary(summary_path, summary)
         experiments_completed = True
     finally:

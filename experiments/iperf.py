@@ -338,7 +338,10 @@ def _block_size(demand_mbps):
 def _ping_command(destination_ip, duration_seconds=None):
     command = ["ping", "-n", "-i", "0.1"]
     if duration_seconds is None:
-        command += ["-c", "10"]
+        # Stop after 3 seconds. Without this limit, ping keeps waiting for
+        # replies from an unreachable destination long after it has sent
+        # its 10 packets.
+        command += ["-c", "10", "-w", "3"]
     else:
         command += ["-w", str(duration_seconds)]
     return command + [destination_ip]
@@ -351,10 +354,16 @@ def measure_idle(net, flows, host_names):
         )
         for flow_id, flow in flows.items()
     }
-    return {
-        flow_id: _parse_ping_output(_read_output(process, 5))
-        for flow_id, process in processes.items()
-    }
+    latency = {}
+    for flow_id, process in processes.items():
+        try:
+            latency[flow_id] = _parse_ping_output(_read_output(process, 5))
+        except RuntimeError:
+            # If the sending host has no working link (for example, because
+            # its switch failed), ping prints no summary. Record the latency
+            # as missing instead of stopping the experiment.
+            latency[flow_id] = {name: None for name in PING_METRIC_NAMES}
+    return latency
 
 
 def run_flows_concurrently(
@@ -403,6 +412,10 @@ def run_flows_concurrently(
                     str(_block_size(demand_mbps)),
                     "-J",
                     "--get-server-output",
+                    # If the server cannot be reached, give up after 3
+                    # seconds instead of waiting for the read timeout below.
+                    "--connect-timeout",
+                    "3000",
                 ],
                 **PROCESS_KWARGS,
             )
@@ -412,10 +425,13 @@ def run_flows_concurrently(
             )
         if status:
             status.note(f"clients started ({len(clients)})")
+        # Give all clients one shared deadline. A client can hang if its
+        # traffic is lost, and a separate timeout for each client would add up.
+        deadline = time.monotonic() + duration_seconds + 15
         for flow_id in flows:
             try:
                 client_output = _read_output(
-                    clients[flow_id], duration_seconds + 15
+                    clients[flow_id], max(0, deadline - time.monotonic())
                 )
             except subprocess.TimeoutExpired as error:
                 client_output = error.output or ""
