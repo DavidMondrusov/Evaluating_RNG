@@ -238,7 +238,7 @@ and `RNG random graph` with `Spraypoint`. Any other combination stops with an
 error before Mininet starts. The UDP per-flow probe must use
 `"concurrent": true`.
 
-Caveat: running the same config twice gives the same `fabric_dead` flows, but
+Caveat: running the same config twice gives the same `fabric_dead` flows (TODO: this is not yet true! OVS in the way we are configuring it still hashes nondeterministically between paths (from Linux hashing randomness), so we need to figure out a way to get it to hash deterministically for this to actually hold), but
 the `connect_failed` flows can differ. With `"concurrent": true`, each flow's
 UDP traffic uses a fixed source port chosen from the traffic `seed`, so it
 takes the same path in every run. iperf3 also opens a TCP control connection
